@@ -897,6 +897,7 @@ async def cb_state(callback: CallbackQuery):
             f"✅ Состояние сохранено: *{state_value}*\n\nСпасибо, {user_name}!",
             parse_mode="Markdown",
         )
+        await notify_trainer(f"📊 {user_name} оценил тренировку {date_str}: {state_value}")
     else:
         await callback.answer("❌ Не удалось сохранить. Попробуй позже.")
     await callback.answer()
@@ -1137,7 +1138,7 @@ async def state_checker():
                         h, m = map(int, t["time"].split(":"))
                         train_dt  = now.replace(hour=h, minute=m, second=0, microsecond=0)
                         delta_min = (now - train_dt).total_seconds() / 60
-                        if 175 <= delta_min <= 200:
+                        if 115 <= delta_min <= 140:
                             _state_notified.add(key)
                             tid = _tid_cache.get(user_name)
                             if not tid:
