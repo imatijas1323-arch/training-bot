@@ -1021,13 +1021,24 @@ async def training_reminder():
 
 async def plan_checker():
     """Каждые 5 минут проверяет появился ли новый план для записанных пользователей."""
-    await asyncio.sleep(120)  # стартовая задержка — сначала записываем текущие планы
+    # Снимаем baseline сразу при старте (без задержки)
+    try:
+        _ensure_bd()
+        if _bd_rows and _bd_rows[0]:
+            for user_name in USER_COLUMNS:
+                for t in get_schedule_for_user(user_name):
+                    if t["booked"]:
+                        key = f"{user_name}|{t['date']}"
+                        _known_plans[key] = t["plan"].strip()
+    except Exception as e:
+        print(f"plan_checker (baseline) ошибка: {e}")
+
     while True:
+        await asyncio.sleep(300)
         try:
             _invalidate_bd()
             _ensure_bd()
             if not _bd_rows or not _bd_rows[0]:
-                await asyncio.sleep(300)
                 continue
 
             for user_name in USER_COLUMNS:
@@ -1037,9 +1048,8 @@ async def plan_checker():
                         continue
                     key = f"{user_name}|{t['date']}"
                     new_plan = t["plan"].strip()
-                    if key not in _known_plans:
-                        _known_plans[key] = new_plan  # первый раз — просто запоминаем
-                    elif new_plan and new_plan != _known_plans[key]:
+                    old_plan = _known_plans.get(key, "")
+                    if new_plan and new_plan != old_plan:
                         _known_plans[key] = new_plan
                         time_label = t["time"] if t["time"] else "удалённо"
                         await notify_user(
@@ -1048,10 +1058,9 @@ async def plan_checker():
                             f"{t['day']} {t['date']} — {time_label}\n\n"
                             f"{new_plan}",
                         )
-            await asyncio.sleep(300)
         except Exception as e:
             print(f"plan_checker ошибка: {e}")
-            await asyncio.sleep(300)
+
 
 async def week_watcher():
     global _week_marker_row, _week_session_notified
