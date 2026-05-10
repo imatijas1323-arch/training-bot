@@ -74,7 +74,20 @@ _inactivity_notified: set[str]       = set() # кому уже отправил�
 _reminded_training:   set[str]       = set() # "имя|дата" — кому уже напомнили о тренировке
 _reminder_date:       str            = ""    # дата последней проверки напоминаний (сброс в полночь)
 _known_plans:         dict[str, str] = {}    # "имя|дата" → план (для уведомления о новом плане)
+_state_notified:      set[str]       = set() # "имя|дата" — кому уже отправили запрос о состоянии
+_state_date:          str            = ""    # дата для сброса _state_notified в полночь
 BD_TTL = 300                                 # секунд (5 минут)
+
+STATES = [
+    "-",
+    "1-4 восстановление/очень легко",
+    "5 легко",
+    "6 умеренно",
+    "7 хорошая работа",
+    "8 довольно тяжело",
+    "9 тяжело",
+    "10 максимальное усилие",
+]
 
 def _invalidate_bd():
     global _bd_ts
@@ -333,6 +346,18 @@ def find_date_rows(date_str: str) -> dict | None:
 
 def set_checkbox(cell_addr: str, value: bool):
     get_source_sheet().update(cell_addr, [[value]], value_input_option="RAW")
+
+def set_state(user_name: str, date_str: str, state_value: str) -> bool:
+    rows = find_date_rows(date_str)
+    if rows is None:
+        return False
+    try:
+        state_row = rows["bron"] + 4
+        get_source_sheet().update(f"{USER_COLUMNS[user_name]}{state_row}", [[state_value]])
+        return True
+    except Exception as e:
+        print(f"set_state({user_name}, {date_str}) ошибка: {e}")
+        return False
 
 def set_booking(user_name: str, date_str: str, value: bool) -> bool:
     rows = find_date_rows(date_str)
@@ -855,6 +880,27 @@ async def cb_profile(callback: CallbackQuery):
     )
     await callback.answer()
 
+# ── Оценка состояния ─────────────────────────────────────────────
+@dp.callback_query(F.data.startswith("state_"))
+async def cb_state(callback: CallbackQuery):
+    parts      = callback.data.split("_")
+    date_str   = parts[1]
+    idx        = int(parts[2])
+    state_value = STATES[idx]
+    user_name  = get_user_name_by_telegram_id(callback.from_user.id)
+    if not user_name:
+        await callback.answer("❌ Вы не зарегистрированы.")
+        return
+    ok = set_state(user_name, date_str, state_value)
+    if ok:
+        await callback.message.edit_text(
+            f"✅ Состояние сохранено: *{state_value}*\n\nСпасибо, {user_name}!",
+            parse_mode="Markdown",
+        )
+    else:
+        await callback.answer("❌ Не удалось сохранить. Попробуй позже.")
+    await callback.answer()
+
 # ── Главное меню ─────────────────────────────────────────────────
 @dp.callback_query(F.data == "main_menu")
 async def cb_main_menu(callback: CallbackQuery):
@@ -1062,6 +1108,55 @@ async def plan_checker():
             print(f"plan_checker ошибка: {e}")
 
 
+async def state_checker():
+    """Через 3 часа после тренировки спрашивает ученика о состоянии."""
+    global _state_notified, _state_date
+    while True:
+        await asyncio.sleep(60)
+        try:
+            now = datetime.now()
+            today_str = now.strftime("%d.%m.%Y")
+
+            if today_str != _state_date:
+                _state_notified = set()
+                _state_date = today_str
+
+            _ensure_bd()
+            if not _bd_rows or not _bd_rows[0]:
+                continue
+
+            for user_name in USER_COLUMNS:
+                trains = get_schedule_for_user(user_name)
+                for t in trains:
+                    if not t["booked"] or not t["time"] or t["date"] != today_str:
+                        continue
+                    key = f"{user_name}|{t['date']}"
+                    if key in _state_notified:
+                        continue
+                    try:
+                        h, m = map(int, t["time"].split(":"))
+                        train_dt  = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                        delta_min = (now - train_dt).total_seconds() / 60
+                        if 175 <= delta_min <= 200:
+                            _state_notified.add(key)
+                            tid = _tid_cache.get(user_name)
+                            if not tid:
+                                continue
+                            b = InlineKeyboardBuilder()
+                            for idx, state in enumerate(STATES[1:], 1):
+                                b.button(text=state, callback_data=f"state_{t['date']}_{idx}")
+                            b.adjust(1)
+                            await bot.send_message(
+                                tid,
+                                f"🏊 {user_name}, как прошла тренировка {t['date']} в {t['time']}?\n\n"
+                                f"Оцени своё состояние:",
+                                reply_markup=b.as_markup(),
+                            )
+                    except Exception:
+                        continue
+        except Exception as e:
+            print(f"state_checker ошибка: {e}")
+
 async def week_watcher():
     global _week_marker_row, _week_session_notified
     while True:
@@ -1119,6 +1214,7 @@ async def main():
     asyncio.create_task(inactivity_checker())
     asyncio.create_task(training_reminder())
     asyncio.create_task(plan_checker())
+    asyncio.create_task(state_checker())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
