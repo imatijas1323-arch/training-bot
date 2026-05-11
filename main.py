@@ -1389,8 +1389,7 @@ async def plan_checker():
                         await notify_user(
                             user_name,
                             f"📋 {user_name}, тренер написал план!\n\n"
-                            f"{t['day']} {t['date']} — {time_label}\n\n"
-                            f"{new_plan}",
+                            f"{t['day']} {t['date']} — {time_label}",
                         )
         except Exception as e:
             print(f"plan_checker ошибка: {e}")
