@@ -401,6 +401,21 @@ def cancel_remote_booking(user_name: str, date_str: str) -> bool:
     set_checkbox(f"{USER_COLUMNS[user_name]}{rows['bron']}", False)
     return True
 
+def cancel_booking(user_name: str, date_str: str) -> bool:
+    """Снимает чекбокс бронирования и очищает комментарий пользователя."""
+    rows = find_date_rows(date_str)
+    if rows is None:
+        return False
+    try:
+        comment_row = rows["vol"] + 1
+        src = get_source_sheet()
+        src.update(f"{USER_COLUMNS[user_name]}{comment_row}", [[""]])
+        set_checkbox(f"{USER_COLUMNS[user_name]}{rows['bron']}", False)
+        return True
+    except Exception as e:
+        print(f"cancel_booking({user_name}, {date_str}) ошибка: {e}")
+        return False
+
 # ═══════════════════════════════════════════════════════════════
 # КЛАВИАТУРЫ
 # ═══════════════════════════════════════════════════════════════
@@ -919,41 +934,90 @@ async def cb_my_booking(callback: CallbackQuery):
         await callback.answer()
         return
 
-    text = f"📝 *{week['label']}*   _{week['dates']}_\n\n"
-    for t in booked:
-        time_display = t["time"] if t["time"] else "удалённо"
-        fmt = " 🏠" if (t["remote"] or not t["time"]) else " 🏊"
-        text += f"✅ *{t['day']}* {t['date']} — {time_display}{fmt}\n"
-
-        if t["plan"]:
-            text += f"    📋 _План:_\n{t['plan']}\n"
-        else:
-            text += "    📋 _План:_ тренер ещё не написал\n"
-
-        if t["volume"]:
-            text += f"    📏 _Объём:_ {t['volume']}\n"
-        else:
-            text += "    📏 _Объём:_ —\n"
-
-        if t["comments"]:
-            text += f"    💬 _{t['comments']}_\n"
-
-        text += "\n"
-
-    text += "Нажмите на тренировку чтобы отменить запись."
+    text = f"📝 *{week['label']}*   _{week['dates']}_\n\nНажмите на тренировку для подробностей:"
 
     b = InlineKeyboardBuilder()
     for t in booked:
-        time_display = t["time"] if t["time"] else "удалённо"
         short = DAY_SHORT.get(t["day"], t["day"])
+        fmt = "🏠" if (t["remote"] or not t["time"]) else "🏊"
+        time_display = t["time"] if t["time"] else "удалённо"
         b.button(
-            text=f"❌ Отменить — {short} {t['date'][:5]}",
-            callback_data=f"unbook_confirm_{t['date']}"
+            text=f"{fmt}  {short} {t['date'][:5]} — {time_display}",
+            callback_data=f"booking_detail_{t['date']}",
         )
     b.button(text="◀️ Назад", callback_data="main_menu")
     b.adjust(1)
 
     await callback.message.edit_caption(caption=text, parse_mode="Markdown", reply_markup=b.as_markup())
+    await callback.answer()
+
+# ── Детальная карточка брони (из Мои записи) ─────────────────────
+@dp.callback_query(F.data.startswith("booking_detail_"))
+async def cb_booking_detail(callback: CallbackQuery):
+    date_str  = callback.data[15:]
+    user_name = get_user_name_by_telegram_id(callback.from_user.id)
+    if not user_name:
+        await callback.message.edit_caption(caption="❌ Вы не зарегистрированы.")
+        await callback.answer()
+        return
+
+    _ensure_bd()
+    trains = get_schedule_for_user(user_name)
+    t = next((x for x in trains if x["date"] == date_str), None)
+    if not t:
+        await callback.message.edit_caption(caption="❌ Тренировка не найдена.")
+        await callback.answer()
+        return
+
+    is_remote = t["remote"] or not t["time"]
+    if is_remote:
+        header = f"🏠 {t['day']} {date_str} — удалённо"
+    else:
+        header = f"🏊 {t['day']} {date_str} — {t['time']}"
+
+    text = f"*{header}*\n\n"
+    if t["plan"]:
+        text += f"📋 *План:*\n{t['plan']}\n\n"
+    else:
+        text += "📋 *План:* тренер ещё не написал\n\n"
+    if t["volume"]:
+        text += f"📏 *Объём:* {t['volume']}\n"
+    if t["comments"]:
+        text += f"💬 *Комментарий:* {t['comments']}\n"
+
+    has_plan_and_volume = bool(t["plan"] and t["volume"])
+
+    b = InlineKeyboardBuilder()
+    if has_plan_and_volume and not is_remote:
+        b.button(text="🏠 Перевести на удалёнку", callback_data=f"to_remote_{date_str}")
+    elif not has_plan_and_volume:
+        b.button(text="❌ Отменить запись", callback_data=f"unbook_confirm_{date_str}")
+    b.button(text="◀️ К записям", callback_data="my_booking")
+    b.adjust(1)
+
+    await callback.message.edit_caption(caption=text, parse_mode="Markdown", reply_markup=b.as_markup())
+    await callback.answer()
+
+# ── Перевод на удалёнку ──────────────────────────────────────────
+@dp.callback_query(F.data.startswith("to_remote_"))
+async def cb_to_remote(callback: CallbackQuery):
+    date_str  = callback.data[10:]
+    user_name = get_user_name_by_telegram_id(callback.from_user.id)
+    if not user_name:
+        await callback.message.edit_caption(caption="❌ Вы не зарегистрированы.")
+        await callback.answer()
+        return
+
+    ok = set_remote_booking_comment(user_name, date_str)
+    if ok:
+        _invalidate_bd()
+        await callback.message.edit_caption(
+            caption=f"🏠 Тренировка {date_str} переведена на удалёнку.",
+            reply_markup=kb_main_menu(),
+        )
+        await notify_trainer(f"🏠 {user_name} перешёл на удалённую тренировку — {date_str}")
+    else:
+        await callback.message.edit_caption(caption="❌ Не удалось изменить. Обратитесь к тренеру.")
     await callback.answer()
 
 # ── Подтверждение отмены ─────────────────────────────────────────
@@ -971,18 +1035,34 @@ async def cb_unbook_confirm(callback: CallbackQuery):
     t = next((x for x in trains if x["date"] == date_str), None)
     time_display = t["time"] if t and t["time"] else "удалённо"
     day_name = t["day"] if t else date_str
+    has_plan_and_volume = bool(t and t["plan"] and t["volume"])
+    is_remote = bool(t and (t["remote"] or not t["time"]))
 
     b = InlineKeyboardBuilder()
-    b.button(text="✅ Да, отменить",    callback_data=f"unbook_{date_str}")
-    b.button(text="◀️ Нет, оставить",  callback_data="my_booking")
+    if has_plan_and_volume and not is_remote:
+        b.button(text="🏠 Перевести на удалёнку", callback_data=f"to_remote_{date_str}")
+        b.button(text="◀️ Оставить",              callback_data="my_booking")
+        caption = (
+            f"*{day_name} {date_str} — {time_display}*\n\n"
+            f"❌ Отменить нельзя — тренер уже написал план и объём.\n"
+            f"Можно перевести тренировку на удалёнку."
+        )
+    elif has_plan_and_volume and is_remote:
+        b.button(text="◀️ Назад", callback_data="my_booking")
+        caption = (
+            f"*{day_name} {date_str} — удалённо*\n\n"
+            f"❌ Отменить нельзя — тренер уже написал план и объём."
+        )
+    else:
+        b.button(text="✅ Да, отменить",   callback_data=f"unbook_{date_str}")
+        b.button(text="◀️ Нет, оставить", callback_data="my_booking")
+        caption = (
+            f"Вы уверены что хотите отменить запись?\n\n"
+            f"*{day_name} {date_str} — {time_display}*"
+        )
     b.adjust(1)
 
-    await callback.message.edit_caption(caption=
-        f"Вы уверены что хотите отменить запись?\n\n"
-        f"*{day_name} {date_str} — {time_display}*",
-        parse_mode="Markdown",
-        reply_markup=b.as_markup(),
-    )
+    await callback.message.edit_caption(caption=caption, parse_mode="Markdown", reply_markup=b.as_markup())
     await callback.answer()
 
 # ── Подтверждённая отмена ────────────────────────────────────────
@@ -995,13 +1075,7 @@ async def cb_unbook(callback: CallbackQuery):
         await callback.answer()
         return
 
-    rows = find_date_rows(date_str)
-    is_remote = False
-    if rows:
-        time_val = get_source_sheet().acell(f"B{rows['vol']}").value or ""
-        is_remote = "удал" in time_val.lower()
-
-    ok = cancel_remote_booking(user_name, date_str) if is_remote else set_booking(user_name, date_str, False)
+    ok = cancel_booking(user_name, date_str)
 
     if ok:
         _invalidate_bd()
