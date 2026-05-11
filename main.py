@@ -1354,6 +1354,15 @@ async def week_watcher():
         except Exception as e:
             print(f"week_watcher ошибка: {e}")
 
+async def send_persistent_keyboards():
+    """Рассылает постоянную кнопку меню всем зарегистрированным пользователям."""
+    await asyncio.sleep(3)
+    for name, tid in _tid_cache.items():
+        try:
+            await bot.send_message(tid, "👇", reply_markup=kb_persistent())
+        except Exception:
+            pass
+
 async def main():
     print("Бот запущен 🚀 v2.0")
     load_all_tids()
@@ -1364,6 +1373,7 @@ async def main():
     asyncio.create_task(training_reminder())
     asyncio.create_task(plan_checker())
     asyncio.create_task(state_checker())
+    asyncio.create_task(send_persistent_keyboards())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
