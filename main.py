@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, FSInputFile
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
@@ -76,7 +76,7 @@ _reminder_date:       str            = ""    # дата последней пр�
 _known_plans:         dict[str, str] = {}    # "имя|дата" → план (для уведомления о новом плане)
 _state_notified:      set[str]       = set() # "имя|дата" — кому уже отправили запрос о состоянии
 _state_date:          str            = ""    # дата для сброса _state_notified в полночь
-_multi_select:        dict[int, set] = {}    # telegram_id → выбранные даты (мультибронирование)
+_multi_select:        dict[int, dict[str, str]] = {}  # telegram_id → {date: "pool"|"remote"|"pending"}
 BD_TTL = 300                                 # секунд (5 минут)
 
 STATES = [
@@ -376,6 +376,20 @@ def set_remote_booking(user_name: str, date_str: str) -> bool:
     set_checkbox(f"{USER_COLUMNS[user_name]}{rows['bron']}", True)
     return True
 
+def set_remote_booking_comment(user_name: str, date_str: str) -> bool:
+    """Бронирует удалённо: пишет 'удалённо' в ячейку комментария пользователя, не трогает колонку B."""
+    rows = find_date_rows(date_str)
+    if rows is None:
+        return False
+    try:
+        comment_row = rows["vol"] + 1
+        get_source_sheet().update(f"{USER_COLUMNS[user_name]}{comment_row}", [["удалённо"]])
+        set_checkbox(f"{USER_COLUMNS[user_name]}{rows['bron']}", True)
+        return True
+    except Exception as e:
+        print(f"set_remote_booking_comment({user_name}, {date_str}) ошибка: {e}")
+        return False
+
 def cancel_remote_booking(user_name: str, date_str: str) -> bool:
     rows = find_date_rows(date_str)
     if rows is None:
@@ -579,8 +593,9 @@ async def cb_schedule(callback: CallbackQuery, _toast: str = ""):
     trains = get_schedule_for_user(user_name)
     booked = [t for t in trains if t["booked"]]
 
-    user_tid = callback.from_user.id
-    selected = _multi_select.get(user_tid, set())
+    user_tid  = callback.from_user.id
+    selected  = _multi_select.get(user_tid, {})
+    confirmed = {d: tp for d, tp in selected.items() if tp != "pending"}
 
     text = f"🗓 {week['label']}   {week['dates']}\n\n"
     if booked:
@@ -589,43 +604,67 @@ async def cb_schedule(callback: CallbackQuery, _toast: str = ""):
             short = DAY_SHORT.get(t["day"], t["day"])
             booked_labels.append(f"{short} {t['date'][:5]}")
         text += f"✅ Вы записаны: {', '.join(booked_labels)}\n\n"
-    if selected:
-        text += f"☑️ Выбрано: {len(selected)} дн. — нажмите «Записаться»\n"
+    if confirmed:
+        text += f"☑️ Выбрано: {len(confirmed)} дн. — нажмите «Записаться»\n"
+    elif selected:
+        text += "⬇️ Выберите тип тренировки:\n"
     else:
         text += "Нажмите на день чтобы выбрать:\n"
 
-    b = InlineKeyboardBuilder()
+    rows_kb = []
     for t in trains:
         short      = DAY_SHORT.get(t["day"], t["day"])
         date_short = t["date"][:5]
+        sel_type   = selected.get(t["date"])
 
         if t["booked"]:
             if t["remote"] or not t["time"]:
                 label = f"✅  {short} {date_short} — 🏠 удалённо"
             else:
                 label = f"✅  {short} {date_short} — 🏊 {t['time']}"
-            b.button(text=label, callback_data=f"day_{t['date']}")
-        elif t["date"] in selected:
-            time_label = t["time"] or "удалённо"
-            label = f"☑️  {short} {date_short} — {time_label}"
-            b.button(text=label, callback_data=f"toggle_{t['date']}")
-        elif t["time"]:
-            label = f"🏊  {short} {date_short} — {t['time']}"
-            b.button(text=label, callback_data=f"toggle_{t['date']}")
-        else:
-            label = f"🏠  {short} {date_short} — можно удалённо"
-            b.button(text=label, callback_data=f"toggle_{t['date']}")
+            rows_kb.append([InlineKeyboardButton(text=label, callback_data=f"day_{t['date']}")])
 
-    if selected:
-        n = len(selected)
+        elif sel_type == "pending":
+            rows_kb.append([InlineKeyboardButton(
+                text=f"◉  {short} {date_short} — выберите тип:",
+                callback_data=f"toggle_{t['date']}",
+            )])
+            rows_kb.append([
+                InlineKeyboardButton(text="🏊 Очно",      callback_data=f"set_pool_{t['date']}"),
+                InlineKeyboardButton(text="🏠 Удалённо",  callback_data=f"set_remote_{t['date']}"),
+            ])
+
+        elif sel_type == "pool":
+            rows_kb.append([InlineKeyboardButton(
+                text=f"☑️  {short} {date_short} — 🏊 {t['time']}",
+                callback_data=f"toggle_{t['date']}",
+            )])
+
+        elif sel_type == "remote":
+            rows_kb.append([InlineKeyboardButton(
+                text=f"☑️  {short} {date_short} — 🏠 удалённо",
+                callback_data=f"toggle_{t['date']}",
+            )])
+
+        else:
+            if t["time"]:
+                label = f"🏊  {short} {date_short} — {t['time']}"
+            else:
+                label = f"🏠  {short} {date_short} — удалённо"
+            rows_kb.append([InlineKeyboardButton(text=label, callback_data=f"toggle_{t['date']}")])
+
+    if confirmed:
+        n    = len(confirmed)
         noun = "день" if n == 1 else "дня" if n <= 4 else "дней"
-        b.button(text=f"✅  ЗАПИСАТЬСЯ НА {n} {noun.upper()}  ✅", callback_data="book_selected")
-    b.button(text="🔄 Обновить", callback_data="refresh_schedule")
-    b.button(text="◀️ Назад", callback_data="main_menu")
-    b.adjust(1)
+        rows_kb.append([InlineKeyboardButton(
+            text=f"✅  ЗАПИСАТЬСЯ НА {n} {noun.upper()}  ✅",
+            callback_data="book_selected",
+        )])
+    rows_kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_schedule")])
+    rows_kb.append([InlineKeyboardButton(text="◀️ Назад",    callback_data="main_menu")])
 
     try:
-        await callback.message.edit_caption(caption=text, reply_markup=b.as_markup())
+        await callback.message.edit_caption(caption=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows_kb))
     except TelegramBadRequest:
         pass  # содержимое не изменилось — игнорируем
     try:
@@ -643,13 +682,35 @@ async def cb_refresh_schedule(callback: CallbackQuery):
 # ── Переключение выбора дня (мультивыбор) ───────────────────────
 @dp.callback_query(F.data.startswith("toggle_"))
 async def cb_toggle_day(callback: CallbackQuery):
-    date_str = callback.data[7:]
-    user_tid = callback.from_user.id
-    sel = _multi_select.setdefault(user_tid, set())
+    date_str  = callback.data[7:]
+    user_tid  = callback.from_user.id
+    user_name = get_user_name_by_telegram_id(user_tid)
+    sel = _multi_select.setdefault(user_tid, {})
+
     if date_str in sel:
-        sel.discard(date_str)
+        del sel[date_str]
     else:
-        sel.add(date_str)
+        _ensure_bd()
+        trains = get_schedule_for_user(user_name or "")
+        t = next((x for x in trains if x["date"] == date_str), None)
+        if t and not t["time"]:
+            sel[date_str] = "remote"   # remote-only день — сразу как удалённо
+        else:
+            sel[date_str] = "pending"  # бассейновый день — показываем выбор типа
+
+    await cb_schedule(callback)
+
+# ── Выбор типа тренировки для выбранного дня ────────────────────
+@dp.callback_query(F.data.startswith("set_pool_"))
+async def cb_set_pool(callback: CallbackQuery):
+    date_str = callback.data[9:]
+    _multi_select.setdefault(callback.from_user.id, {})[date_str] = "pool"
+    await cb_schedule(callback)
+
+@dp.callback_query(F.data.startswith("set_remote_"))
+async def cb_set_remote(callback: CallbackQuery):
+    date_str = callback.data[11:]
+    _multi_select.setdefault(callback.from_user.id, {})[date_str] = "remote"
     await cb_schedule(callback)
 
 # ── Бронирование всех выбранных дней ────────────────────────────
@@ -661,9 +722,10 @@ async def cb_book_selected(callback: CallbackQuery):
         await callback.answer()
         return
 
-    user_tid = callback.from_user.id
-    selected = _multi_select.pop(user_tid, set())
-    if not selected:
+    user_tid  = callback.from_user.id
+    selected  = _multi_select.pop(user_tid, {})
+    confirmed = {d: tp for d, tp in selected.items() if tp != "pending"}
+    if not confirmed:
         await callback.answer("Нет выбранных дней")
         return
 
@@ -671,13 +733,13 @@ async def cb_book_selected(callback: CallbackQuery):
     trains = get_schedule_for_user(user_name)
     booked_dates = []
 
-    for date_str in sorted(selected):
+    for date_str in sorted(confirmed):
+        book_type = confirmed[date_str]
         t = next((x for x in trains if x["date"] == date_str), None)
         if not t or t["booked"]:
             continue
-        is_remote = not t["time"]
-        if is_remote:
-            ok = set_remote_booking(user_name, date_str)
+        if book_type == "remote":
+            ok = set_remote_booking_comment(user_name, date_str)
             if ok:
                 await notify_trainer(f"🏠 {user_name} записался удалённо — {date_str}")
         else:
@@ -685,7 +747,7 @@ async def cb_book_selected(callback: CallbackQuery):
             if ok:
                 await notify_trainer(f"🏊 {user_name} забронировал тренировку — {date_str}")
         if ok:
-            booked_dates.append(date_str)
+            booked_dates.append((date_str, book_type))
             _last_booking[user_name] = date_str
             _inactivity_notified.discard(user_name)
             save_last_booking(user_name, date_str)
@@ -693,9 +755,12 @@ async def cb_book_selected(callback: CallbackQuery):
     _invalidate_bd()
 
     if booked_dates:
-        lines = "\n".join(f"• {d}" for d in booked_dates)
+        lines = "\n".join(
+            f"• {'🏠' if tp == 'remote' else '🏊'} {d}"
+            for d, tp in booked_dates
+        )
         await callback.message.edit_caption(
-            caption=f"🏊 Вы записаны на тренировки:\n{lines}",
+            caption=f"Вы записаны на тренировки:\n{lines}",
             reply_markup=kb_main_menu(),
         )
         await check_subscription(user_name)
