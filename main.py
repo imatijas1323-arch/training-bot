@@ -1388,8 +1388,8 @@ async def plan_checker():
                         time_label = t["time"] if t["time"] else "удалённо"
                         await notify_user(
                             user_name,
-                            f"📋 {user_name}, тренер написал план!\n\n"
-                            f"{t['day']} {t['date']} — {time_label}",
+                            f"📋 {user_name}, тренер написал план тренировки, можно ознакомиться!\n\n"
+                            f"{t['day']} {t['date']}",
                         )
         except Exception as e:
             print(f"plan_checker ошибка: {e}")
