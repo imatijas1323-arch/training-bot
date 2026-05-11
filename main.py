@@ -1320,7 +1320,7 @@ async def week_watcher():
             print(f"week_watcher ошибка: {e}")
 
 async def main():
-    print("Бот запущен 🚀")
+    print("Бот запущен 🚀 v2.0")
     load_all_tids()
     load_last_bookings()
     asyncio.create_task(week_watcher())
