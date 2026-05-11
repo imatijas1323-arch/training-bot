@@ -432,11 +432,20 @@ dp  = Dispatcher()
 # ── /start ──────────────────────────────────────────────────────
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer_photo(
-        photo=FSInputFile("logo.png"),
-        caption="Добро пожаловать 👋\nНажмите кнопку ниже чтобы начать.",
-        reply_markup=kb_start(),
-    )
+    user_name = get_user_name_by_telegram_id(message.from_user.id)
+    if user_name:
+        await message.answer("👇", reply_markup=kb_persistent())
+        await message.answer_photo(
+            photo=FSInputFile("logo.png"),
+            caption=f"Привет, {user_name} 👋",
+            reply_markup=kb_main_menu(),
+        )
+    else:
+        await message.answer_photo(
+            photo=FSInputFile("logo.png"),
+            caption="Добро пожаловать 👋\nНажмите кнопку ниже чтобы начать.",
+            reply_markup=kb_start(),
+        )
 
 @dp.message(F.text == "🚀 Начать пользоваться")
 async def btn_start(message: Message):
