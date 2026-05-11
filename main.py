@@ -608,7 +608,9 @@ async def cb_schedule(callback: CallbackQuery, _toast: str = ""):
             b.button(text=label, callback_data=f"toggle_{t['date']}")
 
     if selected:
-        b.button(text=f"🏊 Записаться ({len(selected)} дн.)", callback_data="book_selected")
+        n = len(selected)
+        noun = "день" if n == 1 else "дня" if n <= 4 else "дней"
+        b.button(text=f"✅  ЗАПИСАТЬСЯ НА {n} {noun.upper()}  ✅", callback_data="book_selected")
     b.button(text="🔄 Обновить", callback_data="refresh_schedule")
     b.button(text="◀️ Назад", callback_data="main_menu")
     b.adjust(1)
