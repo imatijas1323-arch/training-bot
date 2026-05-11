@@ -59,6 +59,15 @@ def get_bd_sheet():
 def get_source_sheet():
     return ss.sheet1
 
+def get_meta_sheet():
+    """Возвращает лист Meta (создаёт если не существует)."""
+    for ws in ss.worksheets():
+        if ws.title == "Meta":
+            return ws
+    ws = ss.add_worksheet(title="Meta", rows=100, cols=2)
+    ws.update([["user", "last_booking"]], "A1")
+    return ws
+
 # ═══════════════════════════════════════════════════════════════
 # КЭШ
 # ═══════════════════════════════════════════════════════════════
@@ -145,22 +154,26 @@ def save_telegram_id(user_name: str, telegram_id: int):
     _tid_cache[user_name] = telegram_id
 
 def save_last_booking(user_name: str, date_str: str):
-    col = USER_COLUMNS[user_name]
     try:
-        get_source_sheet().update(f"{col}7", [[date_str]])
+        meta = get_meta_sheet()
+        rows = meta.get_all_values()
+        for i, row in enumerate(rows):
+            if row and row[0] == user_name:
+                meta.update(f"B{i + 1}", [[date_str]])
+                return
+        meta.append_row([user_name, date_str])
     except Exception as e:
         print(f"save_last_booking({user_name}) ошибка: {e}")
 
 def load_last_bookings():
-    """Загружает даты последних бронирований из строки 7 таблицы."""
+    """Загружает даты последних бронирований из листа Meta."""
     try:
-        row = get_source_sheet().row_values(7)
-        for name, col_letter in USER_COLUMNS.items():
-            col_idx = ord(col_letter) - ord("A")
-            if col_idx < len(row):
-                val = str(row[col_idx]).strip()
-                if val and val not in ("", "None"):
-                    _last_booking[name] = val
+        rows = get_meta_sheet().get_all_values()
+        for row in rows:
+            if len(row) >= 2 and row[0] in USER_COLUMNS:
+                val = str(row[1]).strip()
+                if val:
+                    _last_booking[row[0]] = val
     except Exception as e:
         print(f"load_last_bookings ошибка: {e}")
 
