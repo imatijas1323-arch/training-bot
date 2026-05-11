@@ -593,7 +593,10 @@ async def cb_schedule(callback: CallbackQuery, _toast: str = ""):
         await callback.message.edit_caption(caption=text, reply_markup=b.as_markup())
     except TelegramBadRequest:
         pass  # содержимое не изменилось — игнорируем
-    await callback.answer(_toast)
+    try:
+        await callback.answer(_toast)
+    except TelegramBadRequest:
+        pass  # callback устарел (>30 сек) — игнорируем
 
 # ── Обновить расписание ──────────────────────────────────────────
 @dp.callback_query(F.data == "refresh_schedule")
