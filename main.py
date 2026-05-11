@@ -399,6 +399,12 @@ def kb_start():
         input_field_placeholder="Нажмите кнопку чтобы начать",
     )
 
+def kb_persistent():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🏠 Главное меню")]],
+        resize_keyboard=True,
+    )
+
 def kb_main_menu():
     b = InlineKeyboardBuilder()
     b.button(text="📅 Расписание",  callback_data="schedule")
@@ -436,6 +442,7 @@ async def cmd_start(message: Message):
 async def btn_start(message: Message):
     user_name = get_user_name_by_telegram_id(message.from_user.id)
     if user_name:
+        await message.answer("👇", reply_markup=kb_persistent())
         await message.answer_photo(
             photo=FSInputFile("logo.png"),
             caption=f"Привет, {user_name} 👋",
@@ -447,6 +454,22 @@ async def btn_start(message: Message):
         caption="Выберите своё имя из списка:",
         reply_markup=kb_user_list(),
     )
+
+@dp.message(F.text == "🏠 Главное меню")
+async def btn_main_menu(message: Message):
+    user_name = get_user_name_by_telegram_id(message.from_user.id)
+    if user_name:
+        await message.answer_photo(
+            photo=FSInputFile("logo.png"),
+            caption=f"Привет, {user_name} 👋",
+            reply_markup=kb_main_menu(),
+        )
+    else:
+        await message.answer_photo(
+            photo=FSInputFile("logo.png"),
+            caption="Выберите своё имя из списка:",
+            reply_markup=kb_user_list(),
+        )
 
 # ── Выбор имени ─────────────────────────────────────────────────
 @dp.callback_query(F.data.startswith("user_"))
@@ -487,6 +510,7 @@ async def cb_confirm(callback: CallbackQuery):
         f"✅ Готово! Добро пожаловать, {user_name} 👋",
         reply_markup=kb_main_menu(),
     )
+    await callback.message.answer("👇", reply_markup=kb_persistent())
     tg_user = callback.from_user
     username_str = f"@{tg_user.username}" if tg_user.username else "нет username"
     await notify_trainer(
