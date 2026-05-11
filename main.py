@@ -434,7 +434,7 @@ dp  = Dispatcher()
 async def cmd_start(message: Message):
     user_name = get_user_name_by_telegram_id(message.from_user.id)
     if user_name:
-        await message.answer("👇", reply_markup=kb_persistent())
+        await message.answer("·", reply_markup=kb_persistent())
         await message.answer_photo(
             photo=FSInputFile("logo.png"),
             caption=f"Привет, {user_name} 👋",
@@ -451,7 +451,7 @@ async def cmd_start(message: Message):
 async def btn_start(message: Message):
     user_name = get_user_name_by_telegram_id(message.from_user.id)
     if user_name:
-        await message.answer("👇", reply_markup=kb_persistent())
+        await message.answer("·", reply_markup=kb_persistent())
         await message.answer_photo(
             photo=FSInputFile("logo.png"),
             caption=f"Привет, {user_name} 👋",
@@ -1359,7 +1359,7 @@ async def send_persistent_keyboards():
     await asyncio.sleep(3)
     for name, tid in _tid_cache.items():
         try:
-            await bot.send_message(tid, "👇", reply_markup=kb_persistent())
+            await bot.send_message(tid, "·", reply_markup=kb_persistent())
         except Exception:
             pass
 
