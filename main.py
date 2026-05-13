@@ -6,6 +6,7 @@ import asyncio
 import os
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
@@ -24,6 +25,8 @@ load_dotenv()
 TOKEN          = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 TRAINER_ID     = int(os.getenv("TRAINER_ID", "0"))
+BOT_TIMEZONE   = os.getenv("BOT_TIMEZONE", "Europe/Moscow")
+BOT_TZ         = ZoneInfo(BOT_TIMEZONE)
 
 USER_COLUMNS = {
     "Игорь":    "D",
@@ -98,6 +101,25 @@ STATES = [
     "9 тяжело",
     "10 максимальное усилие",
 ]
+
+def _now() -> datetime:
+    return datetime.now(BOT_TZ)
+
+def _parse_sheet_date(date_str: str, year: int):
+    date_str = str(date_str).strip()
+    for fmt, value in (
+        ("%d.%m.%Y", date_str),
+        ("%d.%m.%Y", f"{date_str}.{year}"),
+    ):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+def _is_today(date_str: str, now: datetime) -> bool:
+    sheet_date = _parse_sheet_date(date_str, now.year)
+    return sheet_date == now.date()
 
 def _invalidate_bd():
     global _bd_ts
@@ -1330,7 +1352,7 @@ async def training_reminder():
     while True:
         await asyncio.sleep(60)
         try:
-            now = datetime.now()
+            now = _now()
             today_str = now.strftime("%d.%m.%Y")
 
             if today_str != _reminder_date:
@@ -1344,7 +1366,7 @@ async def training_reminder():
             for user_name in USER_COLUMNS:
                 trains = get_schedule_for_user(user_name)
                 for t in trains:
-                    if not t["booked"] or not t["time"] or t["date"] != today_str:
+                    if not t["booked"] or not t["time"] or not _is_today(t["date"], now):
                         continue
                     key = f"{user_name}|{t['date']}"
                     if key in _reminded_training:
@@ -1409,12 +1431,12 @@ async def plan_checker():
 
 
 async def state_checker():
-    """Через 3 часа после тренировки спрашивает ученика о состоянии."""
+    """Через 2 часа после тренировки спрашивает ученика о состоянии."""
     global _state_notified, _state_date
     while True:
         await asyncio.sleep(60)
         try:
-            now = datetime.now()
+            now = _now()
             today_str = now.strftime("%d.%m.%Y")
 
             if today_str != _state_date:
@@ -1428,7 +1450,7 @@ async def state_checker():
             for user_name in USER_COLUMNS:
                 trains = get_schedule_for_user(user_name)
                 for t in trains:
-                    if not t["booked"] or not t["time"] or t["date"] != today_str:
+                    if not t["booked"] or not t["time"] or not _is_today(t["date"], now):
                         continue
                     key = f"{user_name}|{t['date']}"
                     if key in _state_notified:
