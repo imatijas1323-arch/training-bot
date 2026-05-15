@@ -205,7 +205,7 @@ def save_telegram_id(user_name: str, telegram_id: int):
 
 def _parse_grade(raw: str) -> str:
     import re
-    parts = re.split(r"\s+(LEADER|JUNIOR|NOT BAD|★|⭑|☆)", raw.strip())
+    parts = re.split(r"\s+(PRO|ELITE|LEADER|JUNIOR|NOT BAD|★|⭑|☆)", raw.strip())
     return " ".join(parts[1:]).strip() if len(parts) >= 2 else ""
 
 def get_user_grade(user_name: str) -> str:
@@ -365,7 +365,7 @@ def sync_bd():
         if col < len(header):
             raw = str(header[col]).strip()
             if raw and raw.lower() not in ("nan", ""):
-                clean = re.split(r"\s+(LEADER|JUNIOR|NOT BAD|★|⭑|☆|Группа)", raw)[0].strip()
+                clean = re.split(r"\s+(PRO|ELITE|LEADER|JUNIOR|NOT BAD|★|⭑|☆|Группа)", raw)[0].strip()
                 user_names[col] = clean
 
     # Парсим 7 дней
