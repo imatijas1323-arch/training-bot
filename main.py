@@ -13,7 +13,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 
@@ -190,6 +190,7 @@ _known_grades:        dict[str, str]            = {}  # имя → текущи�
 _known_dnf_grades:    dict[str, str]            = {}  # имя → текущий DNF/DYN грейд
 _authenticated_trainers: set[int]              = set()  # trainer IDs прошедших авторизацию
 _trainer_state:          dict[int, dict]       = {}     # {user_id: {action, ...}} для многошаговых потоков
+_trainer_view_as:        dict[int, str]        = {}     # trainer_id → имя ученика (режим просмотра)
 BD_TTL = 300                                 # секунд (5 минут)
 
 STATES = [
@@ -284,6 +285,8 @@ def _ensure_bd():
 # ═══════════════════════════════════════════════════════════════
 
 def get_user_name_by_telegram_id(telegram_id: int) -> str | None:
+    if telegram_id in _trainer_view_as:
+        return _trainer_view_as[telegram_id]
     if telegram_id in _user_cache:
         return _user_cache[telegram_id]
     data = get_source_sheet().get_all_values()
@@ -1000,6 +1003,43 @@ async def cb_tr_back_role(callback: CallbackQuery):
     await callback.message.edit_caption(caption="👋 Добро пожаловать!\n\nКто вы?", reply_markup=kb_role_select())
     try: await callback.answer()
     except: pass
+
+# ── /me и /trainer — переключение вида ─────────────────────────
+@dp.message(Command("me"))
+async def cmd_me(message: Message):
+    if not is_trainer(message.from_user.id):
+        return
+    args = message.text.strip().split(maxsplit=1)
+    if len(args) < 2:
+        await message.reply("Использование: /me Имя\nНапример: /me Игорь")
+        return
+    name = args[1].strip()
+    if name not in USER_COLUMNS:
+        names = ", ".join(USER_COLUMNS.keys())
+        await message.reply(f"Ученик «{name}» не найден.\nДоступные: {names}")
+        return
+    _trainer_view_as[message.from_user.id] = name
+    await message.answer("—", reply_markup=kb_persistent())
+    await message.answer_photo(
+        photo=FSInputFile("logo.png"),
+        caption=f"👁 *Просмотр как {name}*\n\nДля выхода: /trainer",
+        reply_markup=kb_main_menu(),
+        parse_mode="Markdown",
+    )
+
+@dp.message(Command("trainer"))
+async def cmd_trainer(message: Message):
+    uid = message.from_user.id
+    if not is_trainer(uid):
+        return
+    _trainer_view_as.pop(uid, None)
+    _trainer_state.pop(uid, None)
+    await message.answer_photo(
+        photo=FSInputFile("logo.png"),
+        caption="🎓 *Панель тренера*",
+        reply_markup=kb_trainer_menu(),
+        parse_mode="Markdown",
+    )
 
 # ── Панель тренера — главное меню ───────────────────────────────
 @dp.callback_query(F.data == "tr_menu")
