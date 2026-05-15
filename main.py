@@ -219,13 +219,23 @@ def get_user_grade(user_name: str) -> str:
         return ""
 
 def load_grades():
-    """Загружает текущие грейды из строки 12 как baseline в _known_grades."""
+    """Загружает грейды из строки 12 в кэш и пишет в Grades тех у кого нет записи."""
     try:
         row = get_source_sheet().row_values(12)
+        grades_sheet = get_grades_sheet()
+        existing = grades_sheet.get_all_values()
+        users_with_entry = {r[0] for r in existing[1:] if r}
+        date_str = _now().strftime("%d.%m.%Y")
+        rows_to_add = []
         for name, col_letter in USER_COLUMNS.items():
             col_idx = ord(col_letter) - ord("A")
             raw = str(row[col_idx]).strip() if col_idx < len(row) else ""
-            _known_grades[name] = _parse_grade(raw)
+            grade = _parse_grade(raw)
+            _known_grades[name] = grade
+            if grade and name not in users_with_entry:
+                rows_to_add.append([name, grade, date_str])
+        if rows_to_add:
+            grades_sheet.append_rows(rows_to_add)
     except Exception as e:
         print(f"load_grades ошибка: {e}")
 
