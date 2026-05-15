@@ -700,6 +700,21 @@ def tr_get_current_week_days(override_row: int = -1) -> list[dict]:
         row_idx += 5
     return result
 
+def load_week_rows():
+    """Загружает строки текущей и прошлой недели из таблицы при старте."""
+    global _week_marker_row, _prev_week_row
+    try:
+        data = get_source_sheet().get_all_values()
+        for i, row in enumerate(data):
+            last = str(row[-1]).strip().lower() if row else ""
+            if "текущ" in last and _week_marker_row == -1:
+                _week_marker_row = i
+            elif "прошл" in last and _prev_week_row == -1:
+                _prev_week_row = i
+        print(f"Строки недель: текущая={_week_marker_row}, прошлая={_prev_week_row}")
+    except Exception as e:
+        print(f"load_week_rows ошибка: {e}")
+
 def tr_find_next_week_row() -> int:
     """Находит строку (0-based) блока Забронировать следующей недели."""
     base = _week_marker_row if _week_marker_row != -1 else _prev_week_row
@@ -3215,6 +3230,7 @@ async def main():
     load_all_tids()
     load_last_bookings()
     load_grades()
+    load_week_rows()
     get_grades_sheet()  # создаёт лист Grades если не существует
     asyncio.create_task(week_watcher())
     asyncio.create_task(grade_checker())
