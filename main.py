@@ -63,12 +63,19 @@ def get_source_sheet():
     return ss.sheet1
 
 def get_meta_sheet():
-    """Возвращает лист Meta (создаёт если не существует)."""
     for ws in ss.worksheets():
         if ws.title == "Meta":
             return ws
     ws = ss.add_worksheet(title="Meta", rows=100, cols=2)
     ws.update([["user", "last_booking"]], "A1")
+    return ws
+
+def get_grades_sheet():
+    for ws in ss.worksheets():
+        if ws.title == "Grades":
+            return ws
+    ws = ss.add_worksheet(title="Grades", rows=1000, cols=3)
+    ws.update([["user", "grade", "date"]], "A1")
     return ws
 
 # ═══════════════════════════════════════════════════════════════
@@ -89,6 +96,7 @@ _known_plans:         dict[str, str] = {}    # "имя|дата" → план (�
 _state_notified:      set[str]       = set() # "имя|дата" — кому уже отправили запрос о состоянии
 _state_date:          str            = ""    # дата для сброса _state_notified в полночь
 _multi_select:        dict[int, dict[str, str]] = {}  # telegram_id → {date: "pool"|"remote"|"pending"}
+_known_grades:        dict[str, str]            = {}  # имя → текущий грейд
 BD_TTL = 300                                 # секунд (5 минут)
 
 STATES = [
@@ -195,17 +203,38 @@ def save_telegram_id(user_name: str, telegram_id: int):
     _user_cache[telegram_id] = user_name
     _tid_cache[user_name] = telegram_id
 
+def _parse_grade(raw: str) -> str:
+    import re
+    parts = re.split(r"\s+(LEADER|JUNIOR|NOT BAD|★|⭑|☆)", raw.strip())
+    return " ".join(parts[1:]).strip() if len(parts) >= 2 else ""
+
 def get_user_grade(user_name: str) -> str:
+    if user_name in _known_grades:
+        return _known_grades[user_name]
     try:
-        import re
         col = USER_COLUMNS[user_name]
         raw = str(get_source_sheet().acell(f"{col}12").value or "").strip()
-        parts = re.split(r"\s+(LEADER|JUNIOR|NOT BAD|★|⭑|☆)", raw)
-        if len(parts) >= 2:
-            return " ".join(parts[1:]).strip()
+        return _parse_grade(raw)
     except Exception:
-        pass
-    return ""
+        return ""
+
+def load_grades():
+    """Загружает текущие грейды из строки 12 как baseline в _known_grades."""
+    try:
+        row = get_source_sheet().row_values(12)
+        for name, col_letter in USER_COLUMNS.items():
+            col_idx = ord(col_letter) - ord("A")
+            raw = str(row[col_idx]).strip() if col_idx < len(row) else ""
+            _known_grades[name] = _parse_grade(raw)
+    except Exception as e:
+        print(f"load_grades ошибка: {e}")
+
+def save_grade_history(user_name: str, grade: str):
+    try:
+        date_str = _now().strftime("%d.%m.%Y")
+        get_grades_sheet().append_row([user_name, grade, date_str])
+    except Exception as e:
+        print(f"save_grade_history({user_name}) ошибка: {e}")
 
 def save_last_booking(user_name: str, date_str: str):
     try:
@@ -1619,6 +1648,34 @@ async def state_checker():
         except Exception as e:
             print(f"state_checker ошибка: {e}")
 
+async def grade_checker():
+    """Каждые 5 минут проверяет изменение грейдов в строке 12."""
+    while True:
+        await asyncio.sleep(300)
+        try:
+            row = get_source_sheet().row_values(12)
+            for name, col_letter in USER_COLUMNS.items():
+                col_idx = ord(col_letter) - ord("A")
+                raw = str(row[col_idx]).strip() if col_idx < len(row) else ""
+                new_grade = _parse_grade(raw)
+                old_grade = _known_grades.get(name)
+                if old_grade is None:
+                    _known_grades[name] = new_grade
+                    continue
+                if new_grade != old_grade:
+                    _known_grades[name] = new_grade
+                    save_grade_history(name, new_grade)
+                    if new_grade:
+                        was = f"Был: {old_grade}\n" if old_grade else ""
+                        await notify_user(
+                            name,
+                            f"🏅 {name}, твой грейд изменён!\n\n"
+                            f"{was}Стало: *{new_grade}*",
+                            parse_mode="Markdown",
+                        )
+        except Exception as e:
+            print(f"grade_checker ошибка: {e}")
+
 async def week_watcher():
     global _week_marker_row, _week_session_notified
     while True:
@@ -1671,7 +1728,9 @@ async def main():
     print("Бот запущен 🚀 v2.0")
     load_all_tids()
     load_last_bookings()
+    load_grades()
     asyncio.create_task(week_watcher())
+    asyncio.create_task(grade_checker())
     asyncio.create_task(weekly_report())
     asyncio.create_task(inactivity_checker())
     asyncio.create_task(training_reminder())
