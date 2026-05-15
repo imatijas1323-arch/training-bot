@@ -4,6 +4,7 @@ bot.py — Swimming Training Bot
 
 import asyncio
 import os
+import re
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -157,6 +158,7 @@ def load_all_tids():
     """Загружает telegram_id всех пользователей из строки 6 таблицы в кэш."""
     try:
         row = get_source_sheet().row_values(6)
+        count = 0
         for name, col_letter in USER_COLUMNS.items():
             col_idx = ord(col_letter) - ord("A")
             if col_idx < len(row):
@@ -166,8 +168,10 @@ def load_all_tids():
                         tid = int(val)
                         _tid_cache[name]  = tid
                         _user_cache[tid]  = name
+                        count += 1
                     except ValueError:
                         pass
+        print(f"load_all_tids: загружено {count} пользователей")
     except Exception as e:
         print(f"load_all_tids ошибка: {e}")
 
@@ -204,7 +208,6 @@ def save_telegram_id(user_name: str, telegram_id: int):
     _tid_cache[user_name] = telegram_id
 
 def _parse_grade(raw: str) -> str:
-    import re
     parts = re.split(r"\s+(PRO|ELITE|LEADER|JUNIOR|NOT BAD|★|⭑|☆)", raw.strip())
     return " ".join(parts[1:]).strip() if len(parts) >= 2 else ""
 
@@ -353,7 +356,6 @@ def sync_bd():
     week_label = ""
     for i in range(week_bron_idx - 1, max(week_bron_idx - 5, -1), -1):
         cell = str(data[i][1]).strip() if len(data[i]) > 1 else ""
-        import re
         if re.search(r"\d+\s+неделя", cell, re.IGNORECASE):
             week_label = cell
             break
@@ -367,6 +369,7 @@ def sync_bd():
             if raw and raw.lower() not in ("nan", ""):
                 clean = re.split(r"\s+(PRO|ELITE|LEADER|JUNIOR|NOT BAD|★|⭑|☆|Группа)", raw)[0].strip()
                 user_names[col] = clean
+
 
     # Парсим 7 дней
     records = []
@@ -387,16 +390,16 @@ def sync_bd():
         date_str = str(com_row[1]).strip()  if len(com_row)  > 1 else ""
         time_raw = str(vol_row[1]).strip()  if len(vol_row)  > 1 else ""
 
+
         if date_str:
             dates.append(date_str)
 
         is_no_train  = "нет тренировки" in time_raw.lower()
         is_remote_day = "удал" in time_raw.lower()
 
-        import re as _re
         time_clean = ""
         if not is_no_train and not is_remote_day and time_raw:
-            time_clean = _re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", time_raw)
+            time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", time_raw)
 
         for col, user in user_names.items():
             booked  = str(bron_row[col]).strip().upper() == "TRUE" if col < len(bron_row) else False
@@ -473,15 +476,6 @@ def set_booking(user_name: str, date_str: str, value: bool) -> bool:
     set_checkbox(f"{USER_COLUMNS[user_name]}{rows['bron']}", value)
     return True
 
-def set_remote_booking(user_name: str, date_str: str) -> bool:
-    rows = find_date_rows(date_str)
-    if rows is None:
-        return False
-    src = get_source_sheet()
-    src.update(f"B{rows['vol']}", [["удаленно"]], value_input_option="RAW")
-    set_checkbox(f"{USER_COLUMNS[user_name]}{rows['bron']}", True)
-    return True
-
 def set_remote_booking_comment(user_name: str, date_str: str) -> bool:
     """Бронирует удалённо: пишет 'удалённо' в ячейку комментария пользователя, не трогает колонку B."""
     rows = find_date_rows(date_str)
@@ -495,17 +489,6 @@ def set_remote_booking_comment(user_name: str, date_str: str) -> bool:
     except Exception as e:
         print(f"set_remote_booking_comment({user_name}, {date_str}) ошибка: {e}")
         return False
-
-def cancel_remote_booking(user_name: str, date_str: str) -> bool:
-    rows = find_date_rows(date_str)
-    if rows is None:
-        return False
-    src = get_source_sheet()
-    time_val = src.acell(f"B{rows['vol']}").value or ""
-    if "удал" in time_val.lower():
-        src.update(f"B{rows['vol']}", [["нет тренировки"]], value_input_option="RAW")
-    set_checkbox(f"{USER_COLUMNS[user_name]}{rows['bron']}", False)
-    return True
 
 def cancel_booking(user_name: str, date_str: str) -> bool:
     """Снимает чекбокс бронирования и очищает комментарий пользователя."""
@@ -854,7 +837,7 @@ async def cb_book_selected(callback: CallbackQuery):
     trains = get_schedule_for_user(user_name)
     booked_dates = []
 
-    for date_str in sorted(confirmed):
+    for date_str in sorted(confirmed, key=lambda d: _parse_sheet_date(d, _now().year) or _now().date()):
         book_type = confirmed[date_str]
         t = next((x for x in trains if x["date"] == date_str), None)
         if not t or t["booked"]:
@@ -959,7 +942,7 @@ async def cb_book_remote(callback: CallbackQuery):
         await callback.answer()
         return
 
-    ok = set_remote_booking(user_name, date_str)
+    ok = set_remote_booking_comment(user_name, date_str)
     if ok:
         _invalidate_bd()
         await callback.message.edit_caption(caption=
@@ -1307,6 +1290,7 @@ async def cb_profile(callback: CallbackQuery):
 
     # Метры за текущую неделю — сумма из BD по записанным тренировкам
     try:
+        _ensure_bd()
         trains = get_schedule_for_user(user_name)
         week_meters = sum(
             int(str(t["volume"]).replace(" м", "").replace(",", "").strip())
@@ -1363,9 +1347,9 @@ async def cb_state(callback: CallbackQuery):
             parse_mode="Markdown",
         )
         await notify_trainer(f"📊 {user_name} оценил тренировку {date_str}: {state_value}")
+        await callback.answer()
     else:
         await callback.answer("❌ Не удалось сохранить. Попробуй позже.")
-    await callback.answer()
 
 # ── Просмотр плана из напоминания ───────────────────────────────
 @dp.callback_query(F.data.startswith("view_plan_"))
@@ -1455,7 +1439,7 @@ async def weekly_report():
     while True:
         await asyncio.sleep(60)
         try:
-            now = datetime.now()
+            now = _now()
             # Воскресенье (weekday=6) в 20:00
             if now.weekday() == 6 and now.hour == 20 and now.minute == 0:
                 if sent_this_week:
@@ -1497,20 +1481,20 @@ async def inactivity_checker():
     while True:
         await asyncio.sleep(60)
         try:
-            now = datetime.now()
+            now = _now()
             if now.hour != 10 or now.minute != 0:
                 continue
             for user_name, last_date_str in list(_last_booking.items()):
                 if user_name in _inactivity_notified:
                     continue
                 try:
-                    last_date = datetime.strptime(last_date_str, "%d.%m.%Y")
+                    last_date = datetime.strptime(last_date_str, "%d.%m.%Y").date()
                 except ValueError:
                     try:
-                        last_date = datetime.strptime(last_date_str + f".{now.year}", "%d.%m.%Y")
+                        last_date = datetime.strptime(last_date_str + f".{now.year}", "%d.%m.%Y").date()
                     except Exception:
                         continue
-                days_gone = (now - last_date).days
+                days_gone = (now.date() - last_date).days
                 if days_gone >= 14:
                     _inactivity_notified.add(user_name)
                     await notify_user(
@@ -1704,7 +1688,6 @@ async def week_watcher():
                 last = str(row[-1]).strip().lower() if row else ""
                 if "текущ" in last:
                     new_row = i
-                    import re
                     for j in range(i - 1, max(i - 5, -1), -1):
                         cell = str(data[j][1]).strip() if len(data[j]) > 1 else ""
                         if re.search(r"\d+\s+неделя", cell, re.IGNORECASE):
