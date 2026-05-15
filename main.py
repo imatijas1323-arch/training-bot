@@ -159,6 +159,14 @@ def get_grades_sheet():
     ws.update([["user", "grade", "date"]], "A1")
     return ws
 
+def get_grade_current_sheet():
+    for ws in ss.worksheets():
+        if ws.title == "GradeCurrent":
+            return ws
+    ws = ss.add_worksheet(title="GradeCurrent", rows=50, cols=3)
+    ws.update([["user", "swim_grade", "dnf_grade"]], "A1")
+    return ws
+
 # ═══════════════════════════════════════════════════════════════
 # КЭШ
 # ═══════════════════════════════════════════════════════════════
@@ -329,39 +337,48 @@ def get_user_grade(user_name: str) -> str:
     if user_name in _known_grades:
         return _known_grades[user_name]
     try:
-        col = USER_COLUMNS[user_name]
-        raw = str(get_source_sheet().acell(f"{col}12").value or "").strip()
-        return _parse_grade(raw)
+        ws = get_grade_current_sheet()
+        rows = ws.get_all_values()
+        for row in rows[1:]:
+            if row and row[0].strip() == user_name:
+                return row[1].strip() if len(row) > 1 else ""
     except Exception:
-        return ""
+        pass
+    return ""
 
 def get_user_dnf_grade(user_name: str) -> str:
     if user_name in _known_dnf_grades:
         return _known_dnf_grades[user_name]
     try:
-        col = USER_COLUMNS[user_name]
-        raw = str(get_source_sheet().acell(f"{col}12").value or "").strip()
-        return _parse_dnf_grade(raw)
+        ws = get_grade_current_sheet()
+        rows = ws.get_all_values()
+        for row in rows[1:]:
+            if row and row[0].strip() == user_name:
+                return row[2].strip() if len(row) > 2 else ""
     except Exception:
-        return ""
+        pass
+    return ""
 
 def load_grades():
-    """Загружает грейды из строки 12 в кэш и пишет в Grades тех у кого нет записи."""
+    """Загружает грейды из листа GradeCurrent в кэш."""
     try:
-        row = get_source_sheet().row_values(12)
+        ws = get_grade_current_sheet()
+        rows = ws.get_all_values()
         grades_sheet = get_grades_sheet()
         existing = grades_sheet.get_all_values()
         users_with_entry = {r[0] for r in existing[1:] if r}
         date_str = _now().strftime("%d.%m.%Y")
         rows_to_add = []
-        for name, col_letter in USER_COLUMNS.items():
-            col_idx = ord(col_letter) - ord("A")
-            raw = str(row[col_idx]).strip() if col_idx < len(row) else ""
-            grade = _parse_grade(raw)
-            _known_grades[name] = grade
-            _known_dnf_grades[name] = _parse_dnf_grade(raw)
-            if grade and name not in users_with_entry:
-                rows_to_add.append([name, grade, date_str])
+        for row in rows[1:]:
+            if not row or not row[0].strip():
+                continue
+            name = row[0].strip()
+            swim = row[1].strip() if len(row) > 1 else ""
+            dnf  = row[2].strip() if len(row) > 2 else ""
+            _known_grades[name] = swim
+            _known_dnf_grades[name] = dnf
+            if swim and name not in users_with_entry:
+                rows_to_add.append([name, swim, date_str])
         if rows_to_add:
             grades_sheet.append_rows(rows_to_add)
     except Exception as e:
@@ -1926,16 +1943,18 @@ async def state_checker():
             print(f"state_checker ошибка: {e}")
 
 async def grade_checker():
-    """Каждые 5 минут проверяет изменение грейдов в строке 12."""
+    """Каждые 5 минут проверяет изменение грейдов в листе GradeCurrent."""
     while True:
         await asyncio.sleep(300)
         try:
-            row = get_source_sheet().row_values(12)
-            for name, col_letter in USER_COLUMNS.items():
-                col_idx = ord(col_letter) - ord("A")
-                raw = str(row[col_idx]).strip() if col_idx < len(row) else ""
-                new_swim = _parse_grade(raw)
-                new_dnf  = _parse_dnf_grade(raw)
+            ws = get_grade_current_sheet()
+            rows = ws.get_all_values()
+            for row in rows[1:]:
+                if not row or not row[0].strip():
+                    continue
+                name     = row[0].strip()
+                new_swim = row[1].strip() if len(row) > 1 else ""
+                new_dnf  = row[2].strip() if len(row) > 2 else ""
                 old_swim = _known_grades.get(name)
                 old_dnf  = _known_dnf_grades.get(name)
 
