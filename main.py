@@ -105,20 +105,20 @@ SWIM_GRADE_INFO = {
     ),
 }
 
-DNF_GRADE_ORDER = ["★", "★★", "★★★"]
+DNF_GRADE_ORDER = ["DNF ★", "DNF ★★", "DNF ★★★"]
 
 DNF_GRADE_INFO = {
-    "★": (
+    "DNF ★": (
         "🤿 *DNF/DYN ★*\n\n"
         "🫁 DNF (без ласт): 25 м\n"
         "🦈 DYN (с ластами): 35 м"
     ),
-    "★★": (
+    "DNF ★★": (
         "🤿 *DNF/DYN ★★*\n\n"
         "🫁 DNF (без ласт): 35 м\n"
         "🦈 DYN (с ластами): 50 м"
     ),
-    "★★★": (
+    "DNF ★★★": (
         "🤿 *DNF/DYN ★★★*\n\n"
         "🫁 DNF (без ласт): 50 м\n"
         "🦈 DYN (с ластами): 75 м"
@@ -309,9 +309,9 @@ def _extract_swim_grade(text: str) -> str:
 def _extract_dnf_grade(text: str) -> str:
     """Извлекает DNF/DYN грейд из текста (правая часть после '/')."""
     text = text.strip()
-    if "★★★" in text: return "★★★"
-    if "★★"  in text: return "★★"
-    if "★"   in text: return "★"
+    if "★★★" in text: return "DNF ★★★"
+    if "★★"  in text: return "DNF ★★"
+    if "★"   in text: return "DNF ★"
     return ""
 
 def _parse_grade(raw: str) -> str:
