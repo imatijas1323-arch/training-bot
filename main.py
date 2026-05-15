@@ -1960,10 +1960,12 @@ async def grade_checker():
 
                 if old_swim is None:
                     _known_grades[name] = new_swim
+                    if new_swim:
+                        save_grade_history(name, new_swim)
                 elif new_swim != old_swim:
                     _known_grades[name] = new_swim
-                    save_grade_history(name, new_swim)
                     if new_swim:
+                        save_grade_history(name, new_swim)
                         await notify_user(
                             name,
                             f"🏅 Поздравляем, {name}!\n\nУ вас новый уровень: *{new_swim}*",
@@ -1972,9 +1974,12 @@ async def grade_checker():
 
                 if old_dnf is None:
                     _known_dnf_grades[name] = new_dnf
+                    if new_dnf:
+                        save_grade_history(name, new_dnf)
                 elif new_dnf != old_dnf:
                     _known_dnf_grades[name] = new_dnf
                     if new_dnf:
+                        save_grade_history(name, new_dnf)
                         await notify_user(
                             name,
                             f"🏅 Поздравляем, {name}!\n\nУ вас новый уровень: *{new_dnf}*",
