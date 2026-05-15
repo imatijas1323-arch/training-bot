@@ -709,7 +709,7 @@ def load_week_rows():
             last = str(row[-1]).strip().lower() if row else ""
             if "текущ" in last and _week_marker_row == -1:
                 _week_marker_row = i
-            elif "прошл" in last and _prev_week_row == -1:
+            elif ("прошед" in last or "прошл" in last) and _prev_week_row == -1:
                 _prev_week_row = i
         print(f"Строки недель: текущая={_week_marker_row}, прошлая={_prev_week_row}")
     except Exception as e:
@@ -726,7 +726,7 @@ def tr_find_next_week_row() -> int:
             continue
         d_val = str(data[i][3]).strip().upper()
         last  = str(data[i][-1]).strip().lower()
-        if d_val in ("TRUE", "FALSE") and "текущ" not in last and "прошл" not in last:
+        if d_val in ("TRUE", "FALSE") and "текущ" not in last and "прошед" not in last and "прошл" not in last:
             return i
     return -1
 
@@ -739,7 +739,7 @@ def tr_close_current_week() -> bool:
     data = src.get_all_values()
     row  = data[_week_marker_row]
     last_col = len(row)
-    src.update(gspread.utils.rowcol_to_a1(_week_marker_row + 1, last_col), [["прошлая неделя"]])
+    src.update(gspread.utils.rowcol_to_a1(_week_marker_row + 1, last_col), [["прошедшая неделя"]])
     toggle_week_collapse(_week_marker_row, True)
     _week_marker_row = -1   # сразу сбрасываем — не ждём week_watcher
     _invalidate_bd()
@@ -754,7 +754,7 @@ def tr_open_next_week() -> str:
     data = src.get_all_values()
     if _week_marker_row != -1:
         cur_last = len(data[_week_marker_row])
-        src.update(gspread.utils.rowcol_to_a1(_week_marker_row + 1, cur_last), [["прошлая неделя"]])
+        src.update(gspread.utils.rowcol_to_a1(_week_marker_row + 1, cur_last), [["прошедшая неделя"]])
         toggle_week_collapse(_week_marker_row, True)
     toggle_week_collapse(row, False)
     nxt_last = len(data[row])
