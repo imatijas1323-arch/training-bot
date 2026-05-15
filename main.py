@@ -130,6 +130,11 @@ def _is_today(date_str: str, now: datetime) -> bool:
     sheet_date = _parse_sheet_date(date_str, now.year)
     return sheet_date == now.date()
 
+def _is_past_day(date_str: str) -> bool:
+    """True если дата строго раньше сегодня."""
+    d = _parse_sheet_date(date_str, _now().year)
+    return d is not None and d < _now().date()
+
 def _is_finished(date_str: str, time_str: str = "") -> bool:
     """True если тренировка закончилась: прошедший день, или сегодня и время+2ч истекло."""
     from datetime import timedelta
@@ -751,11 +756,18 @@ async def cb_schedule(callback: CallbackQuery, _toast: str = ""):
             )])
 
         else:
-            if t["time"]:
-                label = f"🏊  {short} {date_short} — {t['time']}"
+            if _is_past_day(t["date"]):
+                if t["time"]:
+                    label = f"—  {short} {date_short} — {t['time']}"
+                else:
+                    label = f"—  {short} {date_short} — удалённо"
+                rows_kb.append([InlineKeyboardButton(text=label, callback_data="noop")])
             else:
-                label = f"🏠  {short} {date_short} — удалённо"
-            rows_kb.append([InlineKeyboardButton(text=label, callback_data=f"toggle_{t['date']}")])
+                if t["time"]:
+                    label = f"🏊  {short} {date_short} — {t['time']}"
+                else:
+                    label = f"🏠  {short} {date_short} — удалённо"
+                rows_kb.append([InlineKeyboardButton(text=label, callback_data=f"toggle_{t['date']}")])
 
     if confirmed:
         n    = len(confirmed)
@@ -776,6 +788,11 @@ async def cb_schedule(callback: CallbackQuery, _toast: str = ""):
     except TelegramBadRequest:
         pass  # callback устарел (>30 сек) — игнорируем
 
+# ── Noop (прошедшие незабронированные дни) ──────────────────────
+@dp.callback_query(F.data == "noop")
+async def cb_noop(callback: CallbackQuery):
+    await callback.answer()
+
 # ── Обновить расписание ──────────────────────────────────────────
 @dp.callback_query(F.data == "refresh_schedule")
 async def cb_refresh_schedule(callback: CallbackQuery):
@@ -787,6 +804,9 @@ async def cb_refresh_schedule(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("toggle_"))
 async def cb_toggle_day(callback: CallbackQuery):
     date_str  = callback.data[7:]
+    if _is_past_day(date_str):
+        await callback.answer("⛔ Этот день уже прошёл")
+        return
     user_tid  = callback.from_user.id
     user_name = get_user_name_by_telegram_id(user_tid)
     sel = _multi_select.setdefault(user_tid, {})
@@ -922,10 +942,11 @@ async def cb_day_detail(callback: CallbackQuery):
     if t["booked"]:
         if not _is_finished(date_str, t["time"]):
             b.button(text="❌ Отменить запись", callback_data=f"unbook_confirm_{date_str}")
-    elif is_remote_day:
-        b.button(text="🏠 Записаться удалённо", callback_data=f"book_remote_{date_str}")
-    else:
-        b.button(text="🏊 Записаться", callback_data=f"book_{date_str}")
+    elif not _is_past_day(date_str):
+        if is_remote_day:
+            b.button(text="🏠 Записаться удалённо", callback_data=f"book_remote_{date_str}")
+        else:
+            b.button(text="🏊 Записаться", callback_data=f"book_{date_str}")
     b.button(text="◀️ К расписанию", callback_data="schedule")
     b.adjust(1)
 
