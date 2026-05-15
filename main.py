@@ -996,24 +996,17 @@ async def cb_my_booking(callback: CallbackQuery):
     past     = [t for t in booked if _is_finished(t["date"], t["time"])]
 
     rows_kb = []
-    for t in upcoming:
+    for t in upcoming + past:
         short        = DAY_SHORT.get(t["day"], t["day"])
-        fmt          = "🏠" if (t["remote"] or not t["time"]) else "🏊"
         time_display = t["time"] if t["time"] else "удалённо"
+        if _is_finished(t["date"], t["time"]):
+            fmt = "✅"
+        else:
+            fmt = "🏠" if (t["remote"] or not t["time"]) else "🏊"
         rows_kb.append([InlineKeyboardButton(
             text=f"{fmt}  {short} {t['date'][:5]} — {time_display}",
             callback_data=f"booking_detail_{t['date']}",
         )])
-
-    if past:
-        rows_kb.append([InlineKeyboardButton(text="─── прошедшие ───", callback_data="noop")])
-        for t in past:
-            short        = DAY_SHORT.get(t["day"], t["day"])
-            time_display = t["time"] if t["time"] else "удалённо"
-            rows_kb.append([InlineKeyboardButton(
-                text=f"✓  {short} {t['date'][:5]} — {time_display}",
-                callback_data=f"booking_detail_{t['date']}",
-            )])
 
     rows_kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu")])
     b = InlineKeyboardMarkup(inline_keyboard=rows_kb)
@@ -1351,11 +1344,6 @@ async def cb_view_plan(callback: CallbackQuery):
         await callback.message.edit_text(text, parse_mode="Markdown")
     except TelegramBadRequest:
         pass
-    await callback.answer()
-
-# ── Заглушка для нажатия на разделитель ─────────────────────────
-@dp.callback_query(F.data == "noop")
-async def cb_noop(callback: CallbackQuery):
     await callback.answer()
 
 # ── Главное меню ─────────────────────────────────────────────────
