@@ -1340,7 +1340,10 @@ async def cb_profile(callback: CallbackQuery):
         parse_mode="Markdown",
         reply_markup=b.as_markup(),
     )
-    await callback.answer()
+    try:
+        await callback.answer()
+    except TelegramBadRequest:
+        pass
 
 # ── Оценка состояния ─────────────────────────────────────────────
 @dp.callback_query(F.data.startswith("state_"))
