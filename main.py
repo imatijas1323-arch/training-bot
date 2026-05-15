@@ -1602,12 +1602,16 @@ async def plan_checker():
                     old_plan = _known_plans.get(key, "")
                     if new_plan and new_plan != old_plan:
                         _known_plans[key] = new_plan
-                        time_label = t["time"] if t["time"] else "удалённо"
-                        await notify_user(
-                            user_name,
-                            f"📋 {user_name}, тренер написал план тренировки, можно ознакомиться!\n\n"
-                            f"{t['day']} {t['date']}",
-                        )
+                        tid = _tid_cache.get(user_name)
+                        if tid:
+                            pb = InlineKeyboardBuilder()
+                            pb.button(text="📋 Посмотреть план", callback_data=f"view_plan_{t['date']}")
+                            await bot.send_message(
+                                tid,
+                                f"📋 {user_name}, тренер написал план тренировки, можно ознакомиться!\n\n"
+                                f"{t['day']} {t['date']}",
+                                reply_markup=pb.as_markup(),
+                            )
         except Exception as e:
             print(f"plan_checker ошибка: {e}")
 
