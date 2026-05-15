@@ -814,12 +814,20 @@ def kb_role_select():
 
 def kb_trainer_menu():
     b = InlineKeyboardBuilder()
-    b.button(text="📅 Расписание", callback_data="tr_schedule")
-    b.button(text="👥 Ученики",    callback_data="tr_students")
-    b.button(text="📢 Рассылка",   callback_data="tr_broadcast")
-    b.button(text="📊 Статистика", callback_data="tr_stats")
-    b.adjust(2, 2)
+    b.button(text="📅 Расписание",   callback_data="tr_schedule")
+    b.button(text="👥 Ученики",      callback_data="tr_students")
+    b.button(text="📢 Рассылка",     callback_data="tr_broadcast")
+    b.button(text="📊 Статистика",   callback_data="tr_stats")
+    b.button(text="👁 Вид ученика",  callback_data="tr_view_select")
+    b.adjust(2, 2, 1)
     return b.as_markup()
+
+def kb_persistent_exit():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🏠 Главное меню"),
+                   KeyboardButton(text="🔙 Выйти из просмотра")]],
+        resize_keyboard=True,
+    )
 
 def kb_trainer_schedule():
     week_active = _week_marker_row != -1
@@ -1004,42 +1012,77 @@ async def cb_tr_back_role(callback: CallbackQuery):
     try: await callback.answer()
     except: pass
 
-# ── /me и /trainer — переключение вида ─────────────────────────
+# ── Просмотр от имени ученика ────────────────────────────────────
+@dp.callback_query(F.data == "tr_view_select")
+async def cb_tr_view_select(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    b = InlineKeyboardBuilder()
+    for name in USER_COLUMNS:
+        b.button(text=name, callback_data=f"tr_viewas_{name}")
+    b.button(text="◀️ Назад", callback_data="tr_menu")
+    b.adjust(3)
+    await callback.message.edit_caption(
+        caption="👁 Выберите ученика для просмотра:",
+        reply_markup=b.as_markup())
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_viewas_"))
+async def cb_tr_viewas(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    name = callback.data[len("tr_viewas_"):]
+    _trainer_view_as[callback.from_user.id] = name
+    await callback.message.edit_caption(
+        caption=f"👁 *Просмотр как {name}*",
+        reply_markup=kb_main_menu(),
+        parse_mode="Markdown")
+    await callback.message.answer("—", reply_markup=kb_persistent_exit())
+    try: await callback.answer()
+    except: pass
+
+@dp.message(F.text == "🔙 Выйти из просмотра")
+async def btn_exit_view(message: Message):
+    uid = message.from_user.id
+    _trainer_view_as.pop(uid, None)
+    await message.answer("—", reply_markup=kb_persistent())
+    await message.answer_photo(
+        photo=FSInputFile("logo.png"),
+        caption="🎓 *Панель тренера*",
+        reply_markup=kb_trainer_menu(),
+        parse_mode="Markdown")
+
+# ── /me и /trainer — переключение вида (команды) ────────────────
 @dp.message(Command("me"))
 async def cmd_me(message: Message):
-    if not is_trainer(message.from_user.id):
-        return
+    if not is_trainer(message.from_user.id): return
     args = message.text.strip().split(maxsplit=1)
     if len(args) < 2:
         await message.reply("Использование: /me Имя\nНапример: /me Игорь")
         return
     name = args[1].strip()
     if name not in USER_COLUMNS:
-        names = ", ".join(USER_COLUMNS.keys())
-        await message.reply(f"Ученик «{name}» не найден.\nДоступные: {names}")
+        await message.reply(f"Ученик «{name}» не найден.\nДоступные: {', '.join(USER_COLUMNS.keys())}")
         return
     _trainer_view_as[message.from_user.id] = name
-    await message.answer("—", reply_markup=kb_persistent())
+    await message.answer("—", reply_markup=kb_persistent_exit())
     await message.answer_photo(
         photo=FSInputFile("logo.png"),
-        caption=f"👁 *Просмотр как {name}*\n\nДля выхода: /trainer",
+        caption=f"👁 *Просмотр как {name}*",
         reply_markup=kb_main_menu(),
-        parse_mode="Markdown",
-    )
+        parse_mode="Markdown")
 
 @dp.message(Command("trainer"))
 async def cmd_trainer(message: Message):
     uid = message.from_user.id
-    if not is_trainer(uid):
-        return
+    if not is_trainer(uid): return
     _trainer_view_as.pop(uid, None)
     _trainer_state.pop(uid, None)
+    await message.answer("—", reply_markup=kb_persistent())
     await message.answer_photo(
         photo=FSInputFile("logo.png"),
         caption="🎓 *Панель тренера*",
         reply_markup=kb_trainer_menu(),
-        parse_mode="Markdown",
-    )
+        parse_mode="Markdown")
 
 # ── Панель тренера — главное меню ───────────────────────────────
 @dp.callback_query(F.data == "tr_menu")
