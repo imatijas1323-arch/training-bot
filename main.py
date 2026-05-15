@@ -818,7 +818,7 @@ def kb_trainer_menu():
     b.button(text="👥 Ученики",      callback_data="tr_students")
     b.button(text="📢 Рассылка",     callback_data="tr_broadcast")
     b.button(text="📊 Статистика",   callback_data="tr_stats")
-    b.button(text="👁 Вид ученика",  callback_data="tr_view_select")
+    b.button(text="👁 Мой вид",       callback_data="tr_view_select")
     b.adjust(2, 2, 1)
     return b.as_markup()
 
@@ -1015,23 +1015,15 @@ async def cb_tr_back_role(callback: CallbackQuery):
 # ── Просмотр от имени ученика ────────────────────────────────────
 @dp.callback_query(F.data == "tr_view_select")
 async def cb_tr_view_select(callback: CallbackQuery):
-    if not is_trainer(callback.from_user.id): return
-    b = InlineKeyboardBuilder()
-    for name in USER_COLUMNS:
-        b.button(text=name, callback_data=f"tr_viewas_{name}")
-    b.button(text="◀️ Назад", callback_data="tr_menu")
-    b.adjust(3)
-    await callback.message.edit_caption(
-        caption="👁 Выберите ученика для просмотра:",
-        reply_markup=b.as_markup())
-    try: await callback.answer()
-    except: pass
-
-@dp.callback_query(F.data.startswith("tr_viewas_"))
-async def cb_tr_viewas(callback: CallbackQuery):
-    if not is_trainer(callback.from_user.id): return
-    name = callback.data[len("tr_viewas_"):]
-    _trainer_view_as[callback.from_user.id] = name
+    uid = callback.from_user.id
+    if not is_trainer(uid): return
+    # Ищем имя тренера как ученика напрямую (минуя _trainer_view_as)
+    name = _user_cache.get(uid)
+    if not name:
+        try: await callback.answer("Вы не зарегистрированы как ученик", show_alert=True)
+        except: pass
+        return
+    _trainer_view_as[uid] = name
     await callback.message.edit_caption(
         caption=f"👁 *Просмотр как {name}*",
         reply_markup=kb_main_menu(),
@@ -1054,16 +1046,13 @@ async def btn_exit_view(message: Message):
 # ── /me и /trainer — переключение вида (команды) ────────────────
 @dp.message(Command("me"))
 async def cmd_me(message: Message):
-    if not is_trainer(message.from_user.id): return
-    args = message.text.strip().split(maxsplit=1)
-    if len(args) < 2:
-        await message.reply("Использование: /me Имя\nНапример: /me Игорь")
+    uid = message.from_user.id
+    if not is_trainer(uid): return
+    name = _user_cache.get(uid)
+    if not name:
+        await message.reply("Вы не зарегистрированы как ученик.")
         return
-    name = args[1].strip()
-    if name not in USER_COLUMNS:
-        await message.reply(f"Ученик «{name}» не найден.\nДоступные: {', '.join(USER_COLUMNS.keys())}")
-        return
-    _trainer_view_as[message.from_user.id] = name
+    _trainer_view_as[uid] = name
     await message.answer("—", reply_markup=kb_persistent_exit())
     await message.answer_photo(
         photo=FSInputFile("logo.png"),
