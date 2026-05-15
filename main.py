@@ -1727,6 +1727,7 @@ async def main():
     load_all_tids()
     load_last_bookings()
     load_grades()
+    get_grades_sheet()  # создаёт лист Grades если не существует
     asyncio.create_task(week_watcher())
     asyncio.create_task(grade_checker())
     asyncio.create_task(weekly_report())
