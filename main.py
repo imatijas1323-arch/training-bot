@@ -630,15 +630,17 @@ def toggle_week_collapse(bron_row_0based: int, collapse: bool) -> bool:
         groups   = get_sheet_row_groups()
         sheet_id = get_source_sheet().id
         target   = None
+        best_size = float("inf")
         for g in groups:
             r = g.get("range", {})
             if r.get("sheetId") != sheet_id:
                 continue
             start = r.get("startIndex", 0)
             end   = r.get("endIndex",   0)
-            if start <= bron_row_0based < end:
-                target = g
-                break
+            size  = end - start
+            if start <= bron_row_0based < end and size < best_size:
+                target    = g
+                best_size = size
         if not target:
             print(f"toggle_week_collapse: группа не найдена для строки {bron_row_0based}")
             return False
