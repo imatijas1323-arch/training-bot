@@ -179,7 +179,8 @@ _bd_rows:             list           = []   # строки из листа BD
 _bd_ts:               float          = 0.0  # время последней синхронизации
 _week_marker_row:       int  = -1    # строка с "текущая неделя"
 _prev_week_row:         int  = -1    # строка последней закрытой недели
-_pending_open_row:      int  = -1    # развёрнутая но ещё не открытая неделя�� открытая неделя
+_pending_open_row:      int  = -1    # развёрнутая но ещё не открытая неделя
+_viewing_prev_week:     bool = False # тренер просматривает прошлую неделю
 _week_session_notified: bool = True  # True = уже уведомили (на старте не спамим)
 _last_booking:        dict[str, str] = {}   # имя → дата последнего бронирования "DD.MM.YYYY"
 _inactivity_notified: set[str]       = set() # кому уже отправили "давно не виделись"
@@ -1023,9 +1024,33 @@ def kb_tr_week_overview(days: list, week_active: bool, preview: bool = False) ->
         b.button(text="❌ Свернуть обратно",      callback_data="tr_cancel_expand")
     else:
         if week_active:
-            b.button(text="⏹ Закрыть текущую неделю", callback_data="tr_close_week")
+            b.button(text="⏹ Закрыть неделю",   callback_data="tr_close_week")
+            b.button(text="📦 Свернуть",          callback_data="tr_collapse_week")
+        else:
+            if _prev_week_row != -1:
+                b.button(text="📂 Развернуть прошлую неделю", callback_data="tr_view_prev_week")
         b.button(text="📂 Развернуть следующую неделю", callback_data="tr_expand_next")
         b.button(text="◀️ Назад",                       callback_data="tr_menu")
+    b.adjust(1)
+    return b.as_markup()
+
+def kb_tr_prev_week_view(days: list) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for d in days:
+        if not d["date"]:
+            continue
+        short = d["day_short"]
+        date  = d["date"]
+        if d["is_no_train"]:
+            label = f"❌ {short} {date[:5]} — нет тренировки"
+        elif d["is_remote"]:
+            label = f"🏠 {short} {date[:5]} — удалённо"
+        elif d["time"]:
+            label = f"🏊 {short} {date[:5]} — ⏰ {d['time']}"
+        else:
+            label = f"⬜ {short} {date[:5]}"
+        b.button(text=label, callback_data=f"tr_prevday_{date}")
+    b.button(text="📦 Свернуть прошлую неделю", callback_data="tr_collapse_prev")
     b.adjust(1)
     return b.as_markup()
 
@@ -1323,13 +1348,26 @@ async def cb_tr_schedule(callback: CallbackQuery):
     _trainer_state.pop(uid, None)   # сбрасываем любое ожидающее состояние
     _ensure_bd()
     week_active = _week_marker_row != -1
+
+    # Режим просмотра прошлой недели
+    if _viewing_prev_week and _prev_week_row != -1:
+        prev_days = tr_get_current_week_days(override_row=_prev_week_row)
+        dates = [d["date"] for d in prev_days if d["date"]]
+        dr = f"{dates[0][:5]} — {dates[-1][:5]}" if len(dates) >= 2 else ""
+        caption = f"📋 *Прошлая неделя* (просмотр)\n{dr}\n\n📌 Статус: прошлая неделя"
+        await callback.message.edit_caption(
+            caption=caption,
+            reply_markup=kb_tr_prev_week_view(prev_days),
+            parse_mode="Markdown")
+        try: await callback.answer()
+        except: pass
+        return
+
     days = tr_get_current_week_days() if week_active else []
 
-    # Заголовок недели из BD (A1: "N неделя | dd.mm — dd.mm")
     # Режим предпросмотра: следующая неделя развёрнута, но ещё не открыта
     if _pending_open_row != -1:
         preview_days = tr_get_current_week_days(override_row=_pending_open_row)
-        # Заголовок из дат первого и последнего дня
         dates = [d["date"] for d in preview_days if d["date"]]
         dr = f"{dates[0][:5]} — {dates[-1][:5]}" if len(dates) >= 2 else ""
         caption = f"📋 *Предпросмотр следующей недели*\n{dr}\n\n📌 Статус: не выбрано\n\nПоставьте времена, затем откройте неделю:"
@@ -1350,8 +1388,6 @@ async def cb_tr_schedule(callback: CallbackQuery):
 
     status  = "🟢 Активна" if week_active else "🔴 Не активна"
     caption = f"📅 *{week_text}*\n{status}"
-    if not week_active:
-        caption += "\n\nНажмите «📂 Развернуть следующую неделю»"
 
     await callback.message.edit_caption(
         caption=caption,
@@ -1395,6 +1431,70 @@ async def cb_tr_cancel_expand(callback: CallbackQuery):
     try: await callback.answer("↩️ Свёрнуто обратно")
     except: pass
     await cb_tr_schedule(callback)
+
+@dp.callback_query(F.data == "tr_collapse_week")
+async def cb_tr_collapse_week(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    if _week_marker_row != -1:
+        toggle_week_collapse(_week_marker_row, True)
+        try: await callback.answer("📦 Свёрнуто")
+        except: pass
+    else:
+        try: await callback.answer("❌ Нет активной недели")
+        except: pass
+    await cb_tr_schedule(callback)
+
+@dp.callback_query(F.data == "tr_view_prev_week")
+async def cb_tr_view_prev_week(callback: CallbackQuery):
+    global _viewing_prev_week
+    if not is_trainer(callback.from_user.id): return
+    if _prev_week_row == -1:
+        try: await callback.answer("❌ Нет прошлой недели", show_alert=True)
+        except: pass
+        return
+    toggle_week_collapse(_prev_week_row, False)
+    _viewing_prev_week = True
+    try: await callback.answer("📂 Прошлая неделя")
+    except: pass
+    await cb_tr_schedule(callback)
+
+@dp.callback_query(F.data == "tr_collapse_prev")
+async def cb_tr_collapse_prev(callback: CallbackQuery):
+    global _viewing_prev_week
+    if not is_trainer(callback.from_user.id): return
+    if _prev_week_row != -1:
+        toggle_week_collapse(_prev_week_row, True)
+    _viewing_prev_week = False
+    try: await callback.answer("📦 Свёрнуто")
+    except: pass
+    await cb_tr_schedule(callback)
+
+@dp.callback_query(F.data.startswith("tr_prevday_"))
+async def cb_tr_prevday(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    date_str = callback.data[len("tr_prevday_"):]
+    if _prev_week_row == -1:
+        try: await callback.answer()
+        except: pass
+        return
+    days = tr_get_current_week_days(override_row=_prev_week_row)
+    d = next((x for x in days if x["date"] == date_str), None)
+    if not d:
+        try: await callback.answer()
+        except: pass
+        return
+    if d["is_no_train"]:
+        info = "❌ нет тренировки"
+    elif d["is_remote"]:
+        info = "🏠 удалённо"
+    elif d["time"]:
+        info = f"⏰ {d['time']}"
+        if d.get("plan"):
+            info += f"\n📋 {d['plan']}"
+    else:
+        info = "⬜ время не задано"
+    try: await callback.answer(f"{d['day_short']} {date_str[:5]}: {info}", show_alert=True)
+    except: pass
 
 # ── День — редактирование времени ───────────────────────────────
 @dp.callback_query(F.data.startswith("tr_day_"))
