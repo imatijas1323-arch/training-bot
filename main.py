@@ -702,8 +702,8 @@ def tr_get_current_week_days(override_row: int = -1) -> list[dict]:
     return result
 
 def load_week_rows():
-    """Загружает строки текущей и прошлой недели из таблицы при старте."""
-    global _week_marker_row, _prev_week_row
+    """Загружает строки текущей и прошлой недели, а также состояние collapse из таблицы."""
+    global _week_marker_row, _prev_week_row, _week_collapsed
     try:
         data = get_source_sheet().get_all_values()
         for i, row in enumerate(data):
@@ -712,7 +712,25 @@ def load_week_rows():
                 _week_marker_row = i
             elif ("прошед" in last or "прошл" in last) and _prev_week_row == -1:
                 _prev_week_row = i
-        print(f"Строки недель: текущая={_week_marker_row}, прошлая={_prev_week_row}")
+        # Проверяем реальное состояние collapse текущей недели в таблице
+        if _week_marker_row != -1:
+            sheet_id = get_source_sheet().id
+            groups   = get_sheet_row_groups()
+            best_size = float("inf")
+            target = None
+            for g in groups:
+                r = g.get("range", {})
+                if r.get("sheetId") != sheet_id:
+                    continue
+                start = r.get("startIndex", 0)
+                end   = r.get("endIndex",   0)
+                size  = end - start
+                if start <= _week_marker_row < end and size < best_size:
+                    target    = g
+                    best_size = size
+            if target:
+                _week_collapsed = bool(target.get("collapsed", False))
+        print(f"Строки недель: текущая={_week_marker_row}, прошлая={_prev_week_row}, свёрнута={_week_collapsed}")
     except Exception as e:
         print(f"load_week_rows ошибка: {e}")
 
