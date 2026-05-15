@@ -735,12 +735,28 @@ def load_week_rows():
         print(f"load_week_rows ошибка: {e}")
 
 def tr_find_next_week_row() -> int:
-    """Находит строку (0-based) блока Забронировать следующей недели."""
+    """Находит строку (0-based) первого дня следующей недели через группы строк."""
     base = _week_marker_row if _week_marker_row != -1 else _prev_week_row
     if base == -1:
         return -1
+    try:
+        sheet_id = get_source_sheet().id
+        groups   = get_sheet_row_groups()
+        # Берём группы глубины 3 (недели), у которых startIndex > base, сортируем
+        week_groups = sorted(
+            [g for g in groups
+             if g.get("range", {}).get("sheetId") == sheet_id
+             and g.get("depth", 0) == 3
+             and g.get("range", {}).get("startIndex", 0) > base],
+            key=lambda g: g["range"]["startIndex"]
+        )
+        if week_groups:
+            return week_groups[0]["range"]["startIndex"]
+    except Exception as e:
+        print(f"tr_find_next_week_row группы: {e}")
+    # Fallback: поиск по строкам
     data = get_source_sheet().get_all_values()
-    for i in range(base + 35, min(base + 55, len(data))):
+    for i in range(base + 30, min(base + 55, len(data))):
         if len(data[i]) <= 3:
             continue
         d_val = str(data[i][3]).strip().upper()
