@@ -713,7 +713,7 @@ def tr_find_next_week_row() -> int:
     return -1
 
 def tr_close_current_week() -> bool:
-    global _prev_week_row
+    global _prev_week_row, _week_marker_row
     if _week_marker_row == -1:
         return False
     _prev_week_row = _week_marker_row
@@ -723,10 +723,12 @@ def tr_close_current_week() -> bool:
     last_col = len(row)
     src.update(gspread.utils.rowcol_to_a1(_week_marker_row + 1, last_col), [["прошлая неделя"]])
     toggle_week_collapse(_week_marker_row, True)
+    _week_marker_row = -1   # сразу сбрасываем — не ждём week_watcher
     _invalidate_bd()
     return True
 
 def tr_open_next_week() -> str:
+    global _week_marker_row
     row = tr_find_next_week_row()
     if row == -1:
         return "Следующая неделя не найдена"
@@ -739,6 +741,7 @@ def tr_open_next_week() -> str:
     toggle_week_collapse(row, False)
     nxt_last = len(data[row])
     src.update(gspread.utils.rowcol_to_a1(row + 1, nxt_last), [["текущая неделя"]])
+    _week_marker_row = row  # сразу обновляем — не ждём week_watcher
     _invalidate_bd()
     return "ok"
 
