@@ -1188,7 +1188,7 @@ def kb_trainer_swim_grades(name: str):
     for i, g in enumerate(SWIM_GRADE_ORDER):
         label = f"✅ {g}" if g == current else g
         b.button(text=label, callback_data=f"tr_setswim_{i}_{name}")
-    b.button(text="◀️ Назад", callback_data=f"tr_grade_swim_{name}")
+    b.button(text="◀️ Назад", callback_data=f"tr_student_{name}")
     b.adjust(1)
     return b.as_markup()
 
@@ -1199,7 +1199,7 @@ def kb_trainer_dnf_grades(name: str):
         label = f"✅ {g}" if g == current else g
         b.button(text=label, callback_data=f"tr_setdnf_{i}_{name}")
     b.button(text="🗑 Убрать DNF",  callback_data=f"tr_setdnf_clear_{name}")
-    b.button(text="◀️ Назад",       callback_data=f"tr_grade_dnf_{name}")
+    b.button(text="◀️ Назад",       callback_data=f"tr_student_{name}")
     b.adjust(1)
     return b.as_markup()
 
