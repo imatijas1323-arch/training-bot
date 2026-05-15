@@ -309,9 +309,13 @@ def _extract_swim_grade(text: str) -> str:
     ]:
         if keyword in text and symbol in text:
             return f"{keyword} {symbol}"
-    if "PRO"    in text: return "PRO ✪"
-    if "ELITE"  in text: return "ELITE ✪"
-    if "JUNIOR" in text: return "JUNIOR ⭑"
+    # одна ★ без второй → высший подуровень (☆ / ⭑)
+    has_single_star = "★" in text and "★★" not in text
+    if "NOT BAD" in text: return "NOT BAD ☆" if has_single_star else "NOT BAD ⭑⭑⭑"
+    if "LEADER"  in text: return "LEADER ☆"  if has_single_star else "LEADER ⭑⭑⭑"
+    if "PRO"     in text: return "PRO ✪"
+    if "ELITE"   in text: return "ELITE ✪"
+    if "JUNIOR"  in text: return "JUNIOR ⭑"
     return ""
 
 def _extract_dnf_grade(text: str) -> str:
