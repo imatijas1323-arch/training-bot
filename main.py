@@ -1666,11 +1666,9 @@ async def grade_checker():
                     _known_grades[name] = new_grade
                     save_grade_history(name, new_grade)
                     if new_grade:
-                        was = f"Был: {old_grade}\n" if old_grade else ""
                         await notify_user(
                             name,
-                            f"🏅 {name}, твой грейд изменён!\n\n"
-                            f"{was}Стало: *{new_grade}*",
+                            f"🏅 Поздравляем, {name}!\n\nУ вас новый грейд: *{new_grade}*",
                             parse_mode="Markdown",
                         )
         except Exception as e:
