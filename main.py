@@ -860,7 +860,7 @@ async def cb_book_selected(callback: CallbackQuery):
     for date_str in sorted(confirmed, key=lambda d: _parse_sheet_date(d, _now().year) or _now().date()):
         book_type = confirmed[date_str]
         t = next((x for x in trains if x["date"] == date_str), None)
-        if not t or t["booked"]:
+        if not t or t["booked"] or _is_past_day(date_str):
             continue
         if book_type == "remote":
             ok = set_remote_booking_comment(user_name, date_str)
@@ -963,6 +963,11 @@ async def cb_book_remote(callback: CallbackQuery):
         await callback.answer()
         return
 
+    if _is_past_day(date_str):
+        await callback.message.edit_caption(caption="⛔ Этот день уже прошёл.", reply_markup=kb_main_menu())
+        await callback.answer()
+        return
+
     ok = set_remote_booking_comment(user_name, date_str)
     if ok:
         _invalidate_bd()
@@ -987,6 +992,11 @@ async def cb_book(callback: CallbackQuery):
     user_name = get_user_name_by_telegram_id(callback.from_user.id)
     if not user_name:
         await callback.message.edit_caption(caption="❌ Вы не зарегистрированы.")
+        await callback.answer()
+        return
+
+    if _is_past_day(date_str):
+        await callback.message.edit_caption(caption="⛔ Этот день уже прошёл.", reply_markup=kb_main_menu())
         await callback.answer()
         return
 
