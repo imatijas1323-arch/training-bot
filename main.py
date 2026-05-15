@@ -1489,8 +1489,6 @@ async def cb_tr_prevday(callback: CallbackQuery):
         info = "🏠 удалённо"
     elif d["time"]:
         info = f"⏰ {d['time']}"
-        if d.get("plan"):
-            info += f"\n📋 {d['plan']}"
     else:
         info = "⬜ время не задано"
     try: await callback.answer(f"{d['day_short']} {date_str[:5]}: {info}", show_alert=True)
