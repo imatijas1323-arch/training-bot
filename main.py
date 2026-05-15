@@ -985,15 +985,31 @@ def kb_tr_week_overview(days: list, week_active: bool) -> InlineKeyboardMarkup:
     b.adjust(1)
     return b.as_markup()
 
+_QUICK_TIMES = [("🕑 14:00", "1400", 14, 0), ("🕗 20:00", "2000", 20, 0)]
+
 def kb_tr_day_edit(date_str: str, has_time: bool) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="🕑 14:00",         callback_data=f"tr_qtime_1400_{date_str}")
-    b.button(text="🕗 20:00",         callback_data=f"tr_qtime_2000_{date_str}")
-    b.button(text="✏️ Другое время",  callback_data=f"tr_custom_time_{date_str}")
+    now = _now()
+    day_date = _parse_sheet_date(date_str, now.year)
+    is_past_day = day_date is not None and day_date < now.date()
+    is_today    = day_date is not None and day_date == now.date()
+
+    available = []
+    for label, hhmm, hour, minute in _QUICK_TIMES:
+        if is_past_day:
+            continue  # весь день прошёл — быстрые кнопки не нужны
+        if is_today and (now.hour, now.minute) >= (hour, minute):
+            continue  # это время уже прошло сегодня
+        available.append((label, hhmm))
+
+    for label, hhmm in available:
+        b.button(text=label, callback_data=f"tr_qtime_{hhmm}_{date_str}")
+    b.button(text="✏️ Другое время",       callback_data=f"tr_custom_time_{date_str}")
     if has_time:
         b.button(text="❌ Нет тренировки", callback_data=f"tr_notraining_{date_str}")
     b.button(text="◀️ Назад к расписанию", callback_data="tr_schedule")
-    b.adjust(2, 1, 1, 1)
+    n = len(available)
+    b.adjust(*([2] if n == 2 else [1] * n), 1, *(1 for _ in range(1 + int(has_time))))
     return b.as_markup()
 
 def kb_tr_confirm_action(date_str: str) -> InlineKeyboardMarkup:
