@@ -164,7 +164,7 @@ def get_grade_current_sheet():
         if ws.title == "GradeCurrent":
             return ws
     ws = ss.add_worksheet(title="GradeCurrent", rows=50, cols=3)
-    ws.update([["user", "swim_grade", "dnf_grade"]], "A1")
+    ws.update([["Имя", "Плавание", "DNF/DYN"]], "A1")
     return ws
 
 # ═══════════════════════════════════════════════════════════════
