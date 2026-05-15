@@ -182,3 +182,5 @@ _multi_select         # telegram_id → set дат (мультиброниров
 | 2026-05-15 | Фикс: `cb_profile` — обёрнут `callback.answer()` в try/except |
 | 2026-05-15 | Фикс: PRO и ELITE добавлены в паттерн очистки имён в `sync_bd()` |
 | 2026-05-15 | Заменено «Очно» → «С тренером» везде в интерфейсе |
+| 2026-05-15 | Аудит: cb_book_remote исправлен на set_remote_booking_comment (не затирать общую колонку B); cb_state убран двойной callback.answer(); weekly_report и inactivity_checker переведены на _now() (МСК); сортировка дат через _parse_sheet_date; _ensure_bd() в cb_profile; удалён мёртвый код cancel_remote_booking и set_remote_booking; import re вынесен в top-level |
+| 2026-05-15 | Блокировка бронирования прошедших дней: прошедшие незабронированные дни отображаются с префиксом «—» и не интерактивны; защита продублирована на уровне хендлеров cb_book, cb_book_remote, cb_book_selected — старые кнопки в чате не позволяют обойти блокировку |

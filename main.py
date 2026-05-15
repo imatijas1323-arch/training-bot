@@ -1947,7 +1947,7 @@ async def grade_checker():
                     if new_swim:
                         await notify_user(
                             name,
-                            f"🏅 Поздравляем, {name}!\n\nУ вас новый уровень плавания: *{new_swim}*",
+                            f"🏅 Поздравляем, {name}!\n\nУ вас новый уровень: *{new_swim}*",
                             parse_mode="Markdown",
                         )
 
@@ -1958,7 +1958,7 @@ async def grade_checker():
                     if new_dnf:
                         await notify_user(
                             name,
-                            f"🤿 Поздравляем, {name}!\n\nУ вас новый уровень DNF/DYN: *{new_dnf}*",
+                            f"🏅 Поздравляем, {name}!\n\nУ вас новый уровень: *{new_dnf}*",
                             parse_mode="Markdown",
                         )
         except Exception as e:
