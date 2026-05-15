@@ -992,17 +992,13 @@ async def cb_my_booking(callback: CallbackQuery):
 
     text = f"📝 *{week['label']}*   _{week['dates']}_\n\nНажмите на тренировку для подробностей:"
 
-    upcoming = [t for t in booked if not _is_finished(t["date"], t["time"])]
-    past     = [t for t in booked if _is_finished(t["date"], t["time"])]
+    booked.sort(key=lambda t: _parse_sheet_date(t["date"], _now().year) or _now().date())
 
     rows_kb = []
-    for t in upcoming + past:
+    for t in booked:
         short        = DAY_SHORT.get(t["day"], t["day"])
         time_display = t["time"] if t["time"] else "удалённо"
-        if _is_finished(t["date"], t["time"]):
-            fmt = "✅"
-        else:
-            fmt = "🏠" if (t["remote"] or not t["time"]) else "🏊"
+        fmt = "✅" if _is_finished(t["date"], t["time"]) else ("🏠" if (t["remote"] or not t["time"]) else "🏊")
         rows_kb.append([InlineKeyboardButton(
             text=f"{fmt}  {short} {t['date'][:5]} — {time_display}",
             callback_data=f"booking_detail_{t['date']}",
