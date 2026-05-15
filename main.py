@@ -3138,7 +3138,10 @@ async def plan_checker():
                         continue
                     key = f"{user_name}|{t['date']}"
                     new_plan = t["plan"].strip()
-                    old_plan = _known_plans.get(key, "")
+                    if key not in _known_plans:
+                        _known_plans[key] = new_plan  # baseline для новой даты — без уведомления
+                        continue
+                    old_plan = _known_plans[key]
                     if new_plan and new_plan != old_plan:
                         _known_plans[key] = new_plan
                         tid = _tid_cache.get(user_name)
