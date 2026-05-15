@@ -650,16 +650,20 @@ def tr_cancel_day(date_str: str) -> bool:
 
 def tr_get_subscription(user_name: str) -> int:
     try:
-        val = get_source_sheet().acell(f"{USER_COLUMNS[user_name]}9").value
+        col_idx = ord(USER_COLUMNS[user_name]) - ord("A") + 1
+        val = get_source_sheet().cell(9, col_idx).value
         return int(float(str(val or "0")))
-    except Exception:
+    except Exception as e:
+        print(f"tr_get_subscription({user_name}) ошибка: {e}")
         return 0
 
 def tr_set_subscription(user_name: str, value: int) -> bool:
     try:
-        get_source_sheet().update(f"{USER_COLUMNS[user_name]}9", [[value]])
+        col_idx = ord(USER_COLUMNS[user_name]) - ord("A") + 1
+        get_source_sheet().update_cell(9, col_idx, value)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"tr_set_subscription({user_name}) ошибка: {e}")
         return False
 
 def tr_set_grade(user_name: str, swim: str = None, dnf: str = None) -> bool:
