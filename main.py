@@ -751,7 +751,7 @@ async def cb_schedule(callback: CallbackQuery, _toast: str = ""):
                 callback_data=f"toggle_{t['date']}",
             )])
             rows_kb.append([
-                InlineKeyboardButton(text="🏊 Очно",      callback_data=f"set_pool_{t['date']}"),
+                InlineKeyboardButton(text="🏊 С тренером", callback_data=f"set_pool_{t['date']}"),
                 InlineKeyboardButton(text="🏠 Удалённо",  callback_data=f"set_remote_{t['date']}"),
             ])
 
@@ -1146,7 +1146,7 @@ async def cb_participants(callback: CallbackQuery):
 
     text = f"👥 *Тренировка {date_str}*\n\n"
     if pool_list:
-        text += "🏊 *Очно:*\n" + "\n".join(f"• {n}" for n in pool_list) + "\n\n"
+        text += "🏊 *С тренером:*\n" + "\n".join(f"• {n}" for n in pool_list) + "\n\n"
     if remote_list:
         text += "🏠 *Удалённо:*\n" + "\n".join(f"• {n}" for n in remote_list) + "\n"
     if not pool_list and not remote_list:
