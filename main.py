@@ -46,20 +46,20 @@ USER_COLUMNS = {
 }
 
 SWIM_GRADE_ORDER = [
-    "JUNIOR",
+    "JUNIOR ⭑",
     "NOT BAD ⭑⭑⭑",
     "NOT BAD ★★",
     "NOT BAD ☆",
     "LEADER ⭑⭑⭑",
     "LEADER ★★",
     "LEADER ☆",
-    "ELITE",
-    "PRO",
+    "ELITE ✪",
+    "PRO ✪",
 ]
 
 SWIM_GRADE_INFO = {
-    "JUNIOR": (
-        "🏊 *JUNIOR*\n\n"
+    "JUNIOR ⭑": (
+        "🏊 *JUNIOR ⭑*\n\n"
         "Уверенно плывёт 50м вольным стилем.\n"
         "Правильное дыхание, базовая техника."
     ),
@@ -93,14 +93,14 @@ SWIM_GRADE_INFO = {
         "📏 2000м вольным стилем\n"
         "⏱ Темп 50м: 36 с (М)"
     ),
-    "ELITE": (
-        "🏊 *ELITE*\n\n"
+    "ELITE ✪": (
+        "🏊 *ELITE ✪*\n\n"
         "📏 4000м вольным стилем\n"
         "⏱ Темп 50м: 29 с (М) / 33 с (Ж)\n"
         "⏱ 1000м до 16 мин (М) / 19 мин (Ж)"
     ),
-    "PRO": (
-        "🏊 *PRO*\n\n"
+    "PRO ✪": (
+        "🏊 *PRO ✪*\n\n"
         "Высший уровень — соревновательные ранги и титулы."
     ),
 }
@@ -302,16 +302,16 @@ def save_telegram_id(user_name: str, telegram_id: int):
     _tid_cache[user_name] = telegram_id
 
 def _extract_swim_grade(text: str) -> str:
-    """Извлекает грейд плавания из текста (левая часть до '/')."""
+    """Нормализует любой вариант написания к каноничному грейду из SWIM_GRADE_ORDER."""
     for keyword, symbol in [
         ("NOT BAD", "⭑⭑⭑"), ("NOT BAD", "★★"), ("NOT BAD", "☆"),
         ("LEADER",  "⭑⭑⭑"), ("LEADER",  "★★"), ("LEADER",  "☆"),
     ]:
         if keyword in text and symbol in text:
             return f"{keyword} {symbol}"
-    for grade in ("PRO", "ELITE", "LEADER", "NOT BAD", "JUNIOR"):
-        if grade in text:
-            return grade
+    if "PRO"    in text: return "PRO ✪"
+    if "ELITE"  in text: return "ELITE ✪"
+    if "JUNIOR" in text: return "JUNIOR ⭑"
     return ""
 
 def _extract_dnf_grade(text: str) -> str:
@@ -373,8 +373,8 @@ def load_grades():
             if not row or not row[0].strip():
                 continue
             name = row[0].strip()
-            swim = row[1].strip() if len(row) > 1 else ""
-            dnf  = row[2].strip() if len(row) > 2 else ""
+            swim = _extract_swim_grade(row[1].strip() if len(row) > 1 else "")
+            dnf  = _extract_dnf_grade(row[2].strip() if len(row) > 2 else "")
             _known_grades[name] = swim
             _known_dnf_grades[name] = dnf
             if swim and name not in users_with_entry:
@@ -1953,8 +1953,8 @@ async def grade_checker():
                 if not row or not row[0].strip():
                     continue
                 name     = row[0].strip()
-                new_swim = row[1].strip() if len(row) > 1 else ""
-                new_dnf  = row[2].strip() if len(row) > 2 else ""
+                new_swim = _extract_swim_grade(row[1].strip() if len(row) > 1 else "")
+                new_dnf  = _extract_dnf_grade(row[2].strip() if len(row) > 2 else "")
                 old_swim = _known_grades.get(name)
                 old_dnf  = _known_dnf_grades.get(name)
 
