@@ -992,19 +992,33 @@ async def cb_my_booking(callback: CallbackQuery):
 
     text = f"📝 *{week['label']}*   _{week['dates']}_\n\nНажмите на тренировку для подробностей:"
 
-    b = InlineKeyboardBuilder()
-    for t in booked:
-        short = DAY_SHORT.get(t["day"], t["day"])
-        fmt = "🏠" if (t["remote"] or not t["time"]) else "🏊"
+    upcoming = [t for t in booked if not _is_finished(t["date"], t["time"])]
+    past     = [t for t in booked if _is_finished(t["date"], t["time"])]
+
+    rows_kb = []
+    for t in upcoming:
+        short        = DAY_SHORT.get(t["day"], t["day"])
+        fmt          = "🏠" if (t["remote"] or not t["time"]) else "🏊"
         time_display = t["time"] if t["time"] else "удалённо"
-        b.button(
+        rows_kb.append([InlineKeyboardButton(
             text=f"{fmt}  {short} {t['date'][:5]} — {time_display}",
             callback_data=f"booking_detail_{t['date']}",
-        )
-    b.button(text="◀️ Назад", callback_data="main_menu")
-    b.adjust(1)
+        )])
 
-    await callback.message.edit_caption(caption=text, parse_mode="Markdown", reply_markup=b.as_markup())
+    if past:
+        rows_kb.append([InlineKeyboardButton(text="─── прошедшие ───", callback_data="noop")])
+        for t in past:
+            short        = DAY_SHORT.get(t["day"], t["day"])
+            time_display = t["time"] if t["time"] else "удалённо"
+            rows_kb.append([InlineKeyboardButton(
+                text=f"✓  {short} {t['date'][:5]} — {time_display}",
+                callback_data=f"booking_detail_{t['date']}",
+            )])
+
+    rows_kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="main_menu")])
+    b = InlineKeyboardMarkup(inline_keyboard=rows_kb)
+
+    await callback.message.edit_caption(caption=text, parse_mode="Markdown", reply_markup=b)
     await callback.answer()
 
 # ── Детальная карточка брони (из Мои записи) ─────────────────────
@@ -1337,6 +1351,11 @@ async def cb_view_plan(callback: CallbackQuery):
         await callback.message.edit_text(text, parse_mode="Markdown")
     except TelegramBadRequest:
         pass
+    await callback.answer()
+
+# ── Заглушка для нажатия на разделитель ─────────────────────────
+@dp.callback_query(F.data == "noop")
+async def cb_noop(callback: CallbackQuery):
     await callback.answer()
 
 # ── Главное меню ─────────────────────────────────────────────────
