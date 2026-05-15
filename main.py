@@ -121,6 +121,26 @@ def _is_today(date_str: str, now: datetime) -> bool:
     sheet_date = _parse_sheet_date(date_str, now.year)
     return sheet_date == now.date()
 
+def _is_finished(date_str: str, time_str: str = "") -> bool:
+    """True если тренировка закончилась: прошедший день, или сегодня и время+2ч истекло."""
+    from datetime import timedelta
+    now = _now()
+    d = _parse_sheet_date(date_str, now.year)
+    if d is None:
+        return False
+    if d < now.date():
+        return True
+    if d > now.date():
+        return False
+    if not time_str:
+        return False
+    try:
+        h, m = map(int, time_str.split(":"))
+        train_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        return now >= train_dt + timedelta(hours=2)
+    except Exception:
+        return False
+
 def _invalidate_bd():
     global _bd_ts
     _bd_ts = 0.0
@@ -866,7 +886,8 @@ async def cb_day_detail(callback: CallbackQuery):
 
     b = InlineKeyboardBuilder()
     if t["booked"]:
-        b.button(text="❌ Отменить запись", callback_data=f"unbook_confirm_{date_str}")
+        if not _is_finished(date_str, t["time"]):
+            b.button(text="❌ Отменить запись", callback_data=f"unbook_confirm_{date_str}")
     elif is_remote_day:
         b.button(text="🏠 Записаться удалённо", callback_data=f"book_remote_{date_str}")
     else:
@@ -1023,14 +1044,67 @@ async def cb_booking_detail(callback: CallbackQuery):
     has_plan_and_volume = bool(t["plan"] and t["volume"])
 
     b = InlineKeyboardBuilder()
-    if has_plan_and_volume and not is_remote:
-        b.button(text="🏠 Перевести на удалёнку", callback_data=f"to_remote_{date_str}")
-    elif not has_plan_and_volume:
-        b.button(text="❌ Отменить запись", callback_data=f"unbook_confirm_{date_str}")
+    if _is_finished(date_str, t["time"]):
+        pass  # тренировка завершена — только кнопка назад
+    else:
+        if has_plan_and_volume and not is_remote:
+            b.button(text="🏠 Перевести на удалёнку", callback_data=f"to_remote_{date_str}")
+        elif not has_plan_and_volume:
+            b.button(text="❌ Отменить запись", callback_data=f"unbook_confirm_{date_str}")
+        b.button(text="👥 Кто будет на тренировке", callback_data=f"participants_{date_str}")
     b.button(text="◀️ К записям", callback_data="my_booking")
     b.adjust(1)
 
     await callback.message.edit_caption(caption=text, parse_mode="Markdown", reply_markup=b.as_markup())
+    await callback.answer()
+
+# ── Участники тренировки ─────────────────────────────────────────
+@dp.callback_query(F.data.startswith("participants_"))
+async def cb_participants(callback: CallbackQuery):
+    date_str  = callback.data[13:]
+    user_name = get_user_name_by_telegram_id(callback.from_user.id)
+    if not user_name:
+        await callback.answer("❌ Вы не зарегистрированы.")
+        return
+
+    _ensure_bd()
+    if not _bd_rows or not _bd_rows[0]:
+        await callback.answer("Расписание недоступно.")
+        return
+
+    headers = _bd_rows[1]
+    col = {h: i for i, h in enumerate(headers)}
+    pool_list   = []
+    remote_list = []
+
+    for row in _bd_rows[2:]:
+        if not row or len(row) <= col.get("Date", 1):
+            continue
+        if row[col["Date"]].strip() != date_str:
+            continue
+        if row[col.get("Booked", 7)].upper() != "TRUE":
+            continue
+        name = row[col["User"]].strip()
+        if row[col.get("Remote", 6)].lower() == "yes":
+            remote_list.append(name)
+        else:
+            pool_list.append(name)
+
+    text = f"👥 *Тренировка {date_str}*\n\n"
+    if pool_list:
+        text += "🏊 *Очно:*\n" + "\n".join(f"• {n}" for n in pool_list) + "\n\n"
+    if remote_list:
+        text += "🏠 *Удалённо:*\n" + "\n".join(f"• {n}" for n in remote_list) + "\n"
+    if not pool_list and not remote_list:
+        text += "Пока никто не записался."
+
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ Назад", callback_data=f"booking_detail_{date_str}")
+
+    try:
+        await callback.message.edit_caption(caption=text, parse_mode="Markdown", reply_markup=b.as_markup())
+    except TelegramBadRequest:
+        pass
     await callback.answer()
 
 # ── Перевод на удалёнку ──────────────────────────────────────────
@@ -1068,6 +1142,16 @@ async def cb_unbook_confirm(callback: CallbackQuery):
     _ensure_bd()
     trains = get_schedule_for_user(user_name)
     t = next((x for x in trains if x["date"] == date_str), None)
+
+    if _is_finished(date_str, t["time"] if t else ""):
+        b = InlineKeyboardBuilder()
+        b.button(text="◀️ Назад", callback_data="my_booking")
+        await callback.message.edit_caption(
+            caption="❌ Отменить нельзя — тренировка уже прошла.",
+            reply_markup=b.as_markup(),
+        )
+        await callback.answer()
+        return
     time_display = t["time"] if t and t["time"] else "удалённо"
     day_name = t["day"] if t else date_str
     has_plan_and_volume = bool(t and t["plan"] and t["volume"])
@@ -1221,6 +1305,38 @@ async def cb_state(callback: CallbackQuery):
         await notify_trainer(f"📊 {user_name} оценил тренировку {date_str}: {state_value}")
     else:
         await callback.answer("❌ Не удалось сохранить. Попробуй позже.")
+    await callback.answer()
+
+# ── Просмотр плана из напоминания ───────────────────────────────
+@dp.callback_query(F.data.startswith("view_plan_"))
+async def cb_view_plan(callback: CallbackQuery):
+    date_str  = callback.data[10:]
+    user_name = get_user_name_by_telegram_id(callback.from_user.id)
+    if not user_name:
+        await callback.answer("❌ Вы не зарегистрированы.")
+        return
+
+    _ensure_bd()
+    trains = get_schedule_for_user(user_name)
+    t = next((x for x in trains if x["date"] == date_str), None)
+    if not t:
+        await callback.answer("❌ Тренировка не найдена.")
+        return
+
+    text = f"🏊 *{t['day']} {date_str} — {t['time']}*\n\n"
+    if t["plan"]:
+        text += f"📋 *План:*\n{t['plan']}\n\n"
+    else:
+        text += "📋 *План:* тренер ещё не написал — ожидайте\n\n"
+    if t["volume"]:
+        text += f"📏 *Объём:* {t['volume']}\n"
+    if t["comments"]:
+        text += f"💬 *Комментарий:* {t['comments']}\n"
+
+    try:
+        await callback.message.edit_text(text, parse_mode="Markdown")
+    except TelegramBadRequest:
+        pass
     await callback.answer()
 
 # ── Главное меню ─────────────────────────────────────────────────
@@ -1377,11 +1493,17 @@ async def training_reminder():
                         delta_min = (train_dt - now).total_seconds() / 60
                         if 110 <= delta_min <= 130:
                             _reminded_training.add(key)
-                            await notify_user(
-                                user_name,
+                            tid = _tid_cache.get(user_name)
+                            if not tid:
+                                continue
+                            rb = InlineKeyboardBuilder()
+                            rb.button(text="📋 Посмотреть план тренировки", callback_data=f"view_plan_{t['date']}")
+                            await bot.send_message(
+                                tid,
                                 f"⏰ {user_name}, напоминание!\n\n"
                                 f"Через ~2 часа тренировка в {t['time']} 🏊\n"
-                                f"{t['day']}, {t['date']}"
+                                f"{t['day']}, {t['date']}",
+                                reply_markup=rb.as_markup(),
                             )
                     except Exception:
                         continue
