@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
+from google.auth.transport.requests import AuthorizedSession
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart, Command
@@ -177,6 +178,7 @@ _tid_cache:           dict[str, int] = {}   # имя → telegram_id
 _bd_rows:             list           = []   # строки из листа BD
 _bd_ts:               float          = 0.0  # время последней синхронизации
 _week_marker_row:       int  = -1    # строка с "текущая неделя"
+_prev_week_row:         int  = -1    # строка последней закрытой недели
 _week_session_notified: bool = True  # True = уже уведомили (на старте не спамим)
 _last_booking:        dict[str, str] = {}   # имя → дата последнего бронирования "DD.MM.YYYY"
 _inactivity_notified: set[str]       = set() # кому уже отправили "давно не виделись"
@@ -598,28 +600,127 @@ def sync_bd():
 def is_trainer(user_id: int) -> bool:
     return user_id == TRAINER_ID or user_id in _authenticated_trainers
 
+_gauth_session: AuthorizedSession | None = None
+
+def _get_gauth_session() -> AuthorizedSession:
+    global _gauth_session
+    if _gauth_session is None:
+        _gauth_session = AuthorizedSession(creds)
+    return _gauth_session
+
+def get_sheet_row_groups() -> list:
+    """Возвращает список rowGroups для листа 2026 через Sheets API v4."""
+    try:
+        import json as _json
+        session = _get_gauth_session()
+        url  = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}"
+        resp = session.get(url, params={"fields": "sheets(rowGroups,properties.sheetId)"})
+        data = _json.loads(resp.content)
+        src_id = get_source_sheet().id
+        for sheet in data.get("sheets", []):
+            if sheet.get("properties", {}).get("sheetId") == src_id:
+                return sheet.get("rowGroups", [])
+    except Exception as e:
+        print(f"get_sheet_row_groups error: {e}")
+    return []
+
+def toggle_week_collapse(bron_row_0based: int, collapse: bool) -> bool:
+    """Сворачивает или разворачивает группу строк недели в таблице."""
+    try:
+        groups   = get_sheet_row_groups()
+        sheet_id = get_source_sheet().id
+        target   = None
+        for g in groups:
+            r = g.get("range", {})
+            if r.get("sheetId") != sheet_id:
+                continue
+            start = r.get("startIndex", 0)
+            end   = r.get("endIndex",   0)
+            if start <= bron_row_0based < end:
+                target = g
+                break
+        if not target:
+            print(f"toggle_week_collapse: группа не найдена для строки {bron_row_0based}")
+            return False
+        ss.batch_update({"requests": [{
+            "updateDimensionGroup": {
+                "dimensionGroup": {
+                    "range":     target["range"],
+                    "depth":     target.get("depth", 1),
+                    "collapsed": collapse,
+                },
+                "fields": "collapsed",
+            }
+        }]})
+        return True
+    except Exception as e:
+        print(f"toggle_week_collapse error: {e}")
+        return False
+
+DAY_SHORT_RU = {
+    "Monday": "Пн", "Tuesday": "Вт", "Wednesday": "Ср",
+    "Thursday": "Чт", "Friday": "Пт", "Saturday": "Сб", "Sunday": "Вс",
+}
+
+def tr_get_current_week_days() -> list[dict]:
+    """Читает 7 дней текущей недели прямо из листа 2026."""
+    if _week_marker_row == -1:
+        return []
+    data = get_source_sheet().get_all_values()
+    result = []
+    row_idx = _week_marker_row
+    for _ in range(7):
+        if row_idx + 3 >= len(data):
+            break
+        plan_row  = data[row_idx + 1]
+        vol_row   = data[row_idx + 2]
+        com_row   = data[row_idx + 3]
+        day_ru    = str(plan_row[1]).strip().lower() if len(plan_row) > 1 else ""
+        day_en    = DAY_MAP_SYNC.get(day_ru, day_ru.capitalize())
+        day_short = DAY_SHORT_RU.get(day_en, day_en[:2])
+        date_str  = str(com_row[1]).strip()  if len(com_row)  > 1 else ""
+        time_raw  = str(vol_row[1]).strip()  if len(vol_row)  > 1 else ""
+        is_no_train = "нет тренировки" in time_raw.lower()
+        is_remote   = "удал" in time_raw.lower()
+        time_clean  = ""
+        if not is_no_train and not is_remote and time_raw:
+            time_clean = re.sub(r"(\d{1,2})\s+(\d{2})", r"\1:\2", time_raw)
+        result.append({
+            "day_short":   day_short,
+            "date":        date_str,
+            "time":        time_clean,
+            "is_no_train": is_no_train,
+            "is_remote":   is_remote,
+        })
+        row_idx += 5
+    return result
+
 def tr_find_next_week_row() -> int:
     """Находит строку (0-based) блока Забронировать следующей недели."""
-    if _week_marker_row == -1:
+    base = _week_marker_row if _week_marker_row != -1 else _prev_week_row
+    if base == -1:
         return -1
     data = get_source_sheet().get_all_values()
-    for i in range(_week_marker_row + 35, min(_week_marker_row + 55, len(data))):
+    for i in range(base + 35, min(base + 55, len(data))):
         if len(data[i]) <= 3:
             continue
         d_val = str(data[i][3]).strip().upper()
         last  = str(data[i][-1]).strip().lower()
-        if d_val in ("TRUE", "FALSE") and "текущ" not in last:
+        if d_val in ("TRUE", "FALSE") and "текущ" not in last and "прошл" not in last:
             return i
     return -1
 
 def tr_close_current_week() -> bool:
+    global _prev_week_row
     if _week_marker_row == -1:
         return False
+    _prev_week_row = _week_marker_row
     src  = get_source_sheet()
     data = src.get_all_values()
     row  = data[_week_marker_row]
     last_col = len(row)
-    src.update(gspread.utils.rowcol_to_a1(_week_marker_row + 1, last_col), [[""]])
+    src.update(gspread.utils.rowcol_to_a1(_week_marker_row + 1, last_col), [["прошлая неделя"]])
+    toggle_week_collapse(_week_marker_row, True)
     _invalidate_bd()
     return True
 
@@ -631,7 +732,9 @@ def tr_open_next_week() -> str:
     data = src.get_all_values()
     if _week_marker_row != -1:
         cur_last = len(data[_week_marker_row])
-        src.update(gspread.utils.rowcol_to_a1(_week_marker_row + 1, cur_last), [[""]])
+        src.update(gspread.utils.rowcol_to_a1(_week_marker_row + 1, cur_last), [["прошлая неделя"]])
+        toggle_week_collapse(_week_marker_row, True)
+    toggle_week_collapse(row, False)
     nxt_last = len(data[row])
     src.update(gspread.utils.rowcol_to_a1(row + 1, nxt_last), [["текущая неделя"]])
     _invalidate_bd()
@@ -857,35 +960,45 @@ def kb_persistent_exit():
         resize_keyboard=True,
     )
 
-def kb_trainer_schedule():
-    week_active = _week_marker_row != -1
+def kb_tr_week_overview(days: list, week_active: bool) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
+    for d in days:
+        if not d["date"]:
+            continue
+        short = d["day_short"]
+        date  = d["date"]
+        if d["is_no_train"]:
+            label = f"❌ {short} {date[:5]} — нет тренировки"
+        elif d["is_remote"]:
+            label = f"🏠 {short} {date[:5]} — удалённо"
+        elif d["time"]:
+            label = f"🏊 {short} {date[:5]} — ⏰ {d['time']}"
+        else:
+            label = f"⬜ {short} {date[:5]}"
+        b.button(text=label, callback_data=f"tr_day_{date}")
     if week_active:
-        b.button(text="⏹ Закрыть текущую неделю",  callback_data="tr_close_week")
+        b.button(text="⏹ Закрыть текущую неделю",   callback_data="tr_close_week")
     b.button(text="▶️ Открыть следующую неделю", callback_data="tr_open_week")
-    b.button(text="⏰ Поставить время",           callback_data="tr_settime_select")
-    b.button(text="❌ Отменить тренировку",        callback_data="tr_cancel_select")
     b.button(text="◀️ Назад",                     callback_data="tr_menu")
     b.adjust(1)
     return b.as_markup()
 
-def kb_trainer_day_list(prefix: str):
+def kb_tr_day_edit(date_str: str, has_time: bool) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    _ensure_bd()
-    if len(_bd_rows) >= 2:
-        hdr = _bd_rows[1]
-        col = {h: i for i, h in enumerate(hdr)}
-        seen = []
-        for row in _bd_rows[2:]:
-            if not row:
-                continue
-            d   = str(row[col.get("Date", 1)]).strip() if col.get("Date", 1) < len(row) else ""
-            day = str(row[col.get("Day",  2)]).strip() if col.get("Day",  2) < len(row) else ""
-            if d and d not in seen:
-                seen.append(d)
-                b.button(text=f"{day} {d}", callback_data=f"{prefix}{d}")
-    b.button(text="◀️ Назад", callback_data="tr_schedule")
-    b.adjust(1)
+    b.button(text="🕑 14:00",         callback_data=f"tr_qtime_1400_{date_str}")
+    b.button(text="🕗 20:00",         callback_data=f"tr_qtime_2000_{date_str}")
+    b.button(text="✏️ Другое время",  callback_data=f"tr_custom_time_{date_str}")
+    if has_time:
+        b.button(text="❌ Нет тренировки", callback_data=f"tr_notraining_{date_str}")
+    b.button(text="◀️ Назад к расписанию", callback_data="tr_schedule")
+    b.adjust(2, 1, 1, 1)
+    return b.as_markup()
+
+def kb_tr_confirm_action(date_str: str) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Подтвердить", callback_data="tr_confirm_time")
+    b.button(text="❌ Отменить",    callback_data=f"tr_day_{date_str}")
+    b.adjust(2)
     return b.as_markup()
 
 def kb_trainer_students():
@@ -1140,80 +1253,159 @@ async def cb_tr_menu(callback: CallbackQuery):
     try: await callback.answer()
     except: pass
 
-# ── Расписание ──────────────────────────────────────────────────
+# ── Расписание (обзор недели) ────────────────────────────────────
 @dp.callback_query(F.data == "tr_schedule")
 async def cb_tr_schedule(callback: CallbackQuery):
     if not is_trainer(callback.from_user.id): return
+    uid = callback.from_user.id
+    _trainer_state.pop(uid, None)   # сбрасываем любое ожидающее состояние
     _ensure_bd()
-    try:
-        week_label = get_bd_sheet().acell("A1").value or ""
-    except Exception:
-        week_label = ""
-    status = f"🟢 {week_label}" if _week_marker_row != -1 else "🔴 Неделя не активна"
+    week_active = _week_marker_row != -1
+    days = tr_get_current_week_days() if week_active else []
+
+    # Заголовок недели из BD (A1: "N неделя | dd.mm — dd.mm")
+    if week_active and _bd_rows and _bd_rows[0]:
+        raw = str(_bd_rows[0][0])
+        parts = [p.strip() for p in raw.split("|")]
+        week_text = f"{parts[0]} | {parts[1]}" if len(parts) >= 2 else parts[0]
+    else:
+        week_text = "Неделя не активна"
+
+    status  = "🟢 Активна" if week_active else "🔴 Не активна"
+    caption = f"📅 *{week_text}*\n{status}"
+    if not week_active:
+        caption += "\n\nНажмите «▶️ Открыть следующую неделю»"
+
     await callback.message.edit_caption(
-        caption=f"📅 *Расписание*\n\n{status}",
-        reply_markup=kb_trainer_schedule(), parse_mode="Markdown")
+        caption=caption,
+        reply_markup=kb_tr_week_overview(days, week_active),
+        parse_mode="Markdown")
     try: await callback.answer()
     except: pass
 
 @dp.callback_query(F.data == "tr_close_week")
 async def cb_tr_close_week(callback: CallbackQuery):
     if not is_trainer(callback.from_user.id): return
-    ok  = tr_close_current_week()
-    msg = "✅ Неделя закрыта" if ok else "❌ Нет активной недели"
-    await callback.message.edit_caption(caption=msg, reply_markup=kb_trainer_schedule())
-    try: await callback.answer(msg)
+    ok = tr_close_current_week()
+    try: await callback.answer("✅ Неделя закрыта" if ok else "❌ Нет активной недели")
     except: pass
+    await cb_tr_schedule(callback)
 
 @dp.callback_query(F.data == "tr_open_week")
 async def cb_tr_open_week(callback: CallbackQuery):
     if not is_trainer(callback.from_user.id): return
     result = tr_open_next_week()
-    msg    = "✅ Следующая неделя открыта" if result == "ok" else f"❌ {result}"
-    await callback.message.edit_caption(caption=msg, reply_markup=kb_trainer_schedule())
-    try: await callback.answer(msg)
+    try: await callback.answer("✅ Неделя открыта" if result == "ok" else f"❌ {result}")
     except: pass
+    await cb_tr_schedule(callback)
 
-@dp.callback_query(F.data == "tr_settime_select")
-async def cb_tr_settime_select(callback: CallbackQuery):
+# ── День — редактирование времени ───────────────────────────────
+@dp.callback_query(F.data.startswith("tr_day_"))
+async def cb_tr_day(callback: CallbackQuery):
     if not is_trainer(callback.from_user.id): return
+    uid      = callback.from_user.id
+    date_str = callback.data[len("tr_day_"):]
+    _trainer_state.pop(uid, None)
+    days = tr_get_current_week_days()
+    d = next((x for x in days if x["date"] == date_str), None)
+    if not d:
+        try: await callback.answer("❌ День не найден", show_alert=True)
+        except: pass
+        return
+    day_label = f"{d['day_short']} {date_str[:5]}"
+    if d["is_no_train"]:
+        status = "❌ нет тренировки"
+        has_time = True
+    elif d["is_remote"]:
+        status = "🏠 удалённо"
+        has_time = True
+    elif d["time"]:
+        status = f"⏰ {d['time']}"
+        has_time = True
+    else:
+        status = "⬜ время не задано"
+        has_time = False
     await callback.message.edit_caption(
-        caption="⏰ Выберите день для установки времени:",
-        reply_markup=kb_trainer_day_list("tr_settime_day_"))
+        caption=f"📅 *{day_label}*  —  {status}\n\nВыберите время:",
+        reply_markup=kb_tr_day_edit(date_str, has_time),
+        parse_mode="Markdown")
     try: await callback.answer()
     except: pass
 
-@dp.callback_query(F.data.startswith("tr_settime_day_"))
-async def cb_tr_settime_day(callback: CallbackQuery):
+@dp.callback_query(F.data.startswith("tr_qtime_"))
+async def cb_tr_qtime(callback: CallbackQuery):
     if not is_trainer(callback.from_user.id): return
-    date_str = callback.data[len("tr_settime_day_"):]
-    _trainer_state[callback.from_user.id] = {"action": "set_time", "date": date_str}
-    b = InlineKeyboardBuilder()
-    b.button(text="◀️ Назад", callback_data="tr_settime_select")
+    # формат: tr_qtime_{hhmm}_{date}
+    rest  = callback.data[len("tr_qtime_"):]
+    sep   = rest.index("_")
+    hhmm, date_str = rest[:sep], rest[sep+1:]
+    time_str = f"{hhmm[:2]}:{hhmm[2:]}" if len(hhmm) == 4 else hhmm
+    uid  = callback.from_user.id
+    _trainer_state[uid] = {"action": "confirm_time", "date": date_str, "time": time_str}
+    days = tr_get_current_week_days()
+    d = next((x for x in days if x["date"] == date_str), None)
+    day_label = f"{d['day_short']} {date_str[:5]}" if d else date_str[:5]
     await callback.message.edit_caption(
-        caption=f"⏰ Введите время для *{date_str}*\n\nНапример: `7:30` или `нет тренировки`",
+        caption=f"⏰ Установить *{time_str}* для {day_label}?",
+        reply_markup=kb_tr_confirm_action(date_str),
+        parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_custom_time_"))
+async def cb_tr_custom_time(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    date_str = callback.data[len("tr_custom_time_"):]
+    uid  = callback.from_user.id
+    days = tr_get_current_week_days()
+    d = next((x for x in days if x["date"] == date_str), None)
+    day_label = f"{d['day_short']} {date_str[:5]}" if d else date_str[:5]
+    _trainer_state[uid] = {
+        "action":     "custom_time",
+        "date":       date_str,
+        "day_short":  d["day_short"] if d else "",
+        "chat_id":    callback.message.chat.id,
+        "message_id": callback.message.message_id,
+    }
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ Назад", callback_data=f"tr_day_{date_str}")
+    await callback.message.edit_caption(
+        caption=f"⏰ *{day_label}* — введите время сообщением\n\nПример: `9:30` или `20:00`",
         reply_markup=b.as_markup(), parse_mode="Markdown")
     try: await callback.answer()
     except: pass
 
-@dp.callback_query(F.data == "tr_cancel_select")
-async def cb_tr_cancel_select(callback: CallbackQuery):
+@dp.callback_query(F.data.startswith("tr_notraining_"))
+async def cb_tr_notraining(callback: CallbackQuery):
     if not is_trainer(callback.from_user.id): return
+    date_str = callback.data[len("tr_notraining_"):]
+    uid  = callback.from_user.id
+    days = tr_get_current_week_days()
+    d = next((x for x in days if x["date"] == date_str), None)
+    day_label = f"{d['day_short']} {date_str[:5]}" if d else date_str[:5]
+    _trainer_state[uid] = {"action": "confirm_time", "date": date_str, "time": "нет тренировки"}
     await callback.message.edit_caption(
-        caption="❌ Выберите день для отмены тренировки:",
-        reply_markup=kb_trainer_day_list("tr_cancelday_"))
+        caption=f"❌ Отменить тренировку *{day_label}*?",
+        reply_markup=kb_tr_confirm_action(date_str),
+        parse_mode="Markdown")
     try: await callback.answer()
     except: pass
 
-@dp.callback_query(F.data.startswith("tr_cancelday_"))
-async def cb_tr_cancelday(callback: CallbackQuery):
+@dp.callback_query(F.data == "tr_confirm_time")
+async def cb_tr_confirm_time(callback: CallbackQuery):
     if not is_trainer(callback.from_user.id): return
-    date_str = callback.data[len("tr_cancelday_"):]
-    ok  = tr_cancel_day(date_str)
-    msg = f"✅ Тренировка {date_str} отменена" if ok else "❌ Не удалось отменить"
-    await callback.message.edit_caption(caption=msg, reply_markup=kb_trainer_schedule())
-    try: await callback.answer(msg)
+    uid   = callback.from_user.id
+    state = _trainer_state.pop(uid, {})
+    date_str = state.get("date", "")
+    time_str = state.get("time", "")
+    if not date_str or time_str == "":
+        try: await callback.answer("❌ Нет данных для подтверждения", show_alert=True)
+        except: pass
+        return
+    ok = tr_set_time(date_str, time_str)
+    try: await callback.answer("✅ Сохранено" if ok else "❌ Ошибка записи")
     except: pass
+    await cb_tr_schedule(callback)
 
 # ── Ученики ─────────────────────────────────────────────────────
 @dp.callback_query(F.data == "tr_students")
@@ -1504,6 +1696,28 @@ async def handle_trainer_input(message: Message):
             await message.reply(f"✅ Время для *{date_str}* установлено: `{time_str}`", parse_mode="Markdown")
         else:
             await message.reply(f"❌ Не удалось обновить время для {date_str}")
+
+    elif action == "custom_time":
+        date_str  = state.get("date", "")
+        day_short = state.get("day_short", "")
+        chat_id   = state.get("chat_id")
+        msg_id    = state.get("message_id")
+        raw = (message.text or "").strip()
+        # нормализуем "9 30" → "9:30"
+        normalized = re.sub(r"^(\d{1,2})\s+(\d{2})$", r"\1:\2", raw)
+        if not re.match(r"^\d{1,2}:\d{2}$", normalized):
+            await message.reply("❌ Неверный формат. Пример: `9:30` или `20:00`", parse_mode="Markdown")
+            return
+        _trainer_state[uid] = {"action": "confirm_time", "date": date_str, "time": normalized}
+        day_label = f"{day_short} {date_str[:5]}" if day_short else date_str[:5]
+        try:
+            await bot.edit_message_caption(
+                chat_id=chat_id, message_id=msg_id,
+                caption=f"⏰ Установить *{normalized}* для {day_label}?",
+                reply_markup=kb_tr_confirm_action(date_str),
+                parse_mode="Markdown")
+        except Exception as e:
+            print(f"handle_trainer_input custom_time edit error: {e}")
 
 # ── Выбор имени ─────────────────────────────────────────────────
 @dp.callback_query(F.data.startswith("user_"))
