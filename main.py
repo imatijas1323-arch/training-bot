@@ -195,6 +195,18 @@ def save_telegram_id(user_name: str, telegram_id: int):
     _user_cache[telegram_id] = user_name
     _tid_cache[user_name] = telegram_id
 
+def get_user_grade(user_name: str) -> str:
+    try:
+        import re
+        col = USER_COLUMNS[user_name]
+        raw = str(get_source_sheet().acell(f"{col}12").value or "").strip()
+        parts = re.split(r"\s+(LEADER|JUNIOR|NOT BAD|★|⭑|☆)", raw)
+        if len(parts) >= 2:
+            return " ".join(parts[1:]).strip()
+    except Exception:
+        pass
+    return ""
+
 def save_last_booking(user_name: str, date_str: str):
     try:
         meta = get_meta_sheet()
@@ -1252,6 +1264,7 @@ async def cb_profile(callback: CallbackQuery):
     data = src.batch_get([f"{col}4", f"{col}5"])
     meters_last_year = data[0][0][0] if data[0] else "—"
     meters_year      = data[1][0][0] if data[1] else "—"
+    grade            = get_user_grade(user_name)
 
     # Метры за текущую неделю — сумма из BD по записанным тренировкам
     try:
@@ -1277,8 +1290,10 @@ async def cb_profile(callback: CallbackQuery):
     b = InlineKeyboardBuilder()
     b.button(text="◀️ Назад", callback_data="main_menu")
 
+    grade_line = f"🏅 *Грейд:* {grade}\n\n" if grade else ""
     await callback.message.edit_caption(caption=
         f"👤 *Профиль — {user_name}*\n\n"
+        f"{grade_line}"
         f"🏊 Метров на этой неделе:\n*{meters_week}*\n\n"
         f"📅 Метров в {2026} году:\n*{meters_year}*\n\n"
         f"📅 Метров в {2025} году:\n*{meters_last_year}*\n"
