@@ -710,8 +710,8 @@ def load_week_rows():
             last = str(row[-1]).strip().lower() if row else ""
             if "текущ" in last and _week_marker_row == -1:
                 _week_marker_row = i
-            elif ("прошед" in last or "прошл" in last) and _prev_week_row == -1:
-                _prev_week_row = i
+            elif "прошед" in last or "прошл" in last:
+                _prev_week_row = i  # берём последнюю прошедшую (максимальная строка)
         # Проверяем реальное состояние collapse текущей недели в таблице
         if _week_marker_row != -1:
             sheet_id = get_source_sheet().id
