@@ -691,17 +691,35 @@ def tr_set_grade(user_name: str, swim: str = None, dnf: str = None) -> bool:
 
 def tr_get_week_stats() -> dict:
     _ensure_bd()
+    if len(_bd_rows) < 2:
+        return {}
+    hdr = _bd_rows[1]
+    col = {h: i for i, h in enumerate(hdr)}
     stats: dict[str, int] = {}
-    for row in _bd_rows:
-        name = str(row.get("User", "")).strip()
-        if name and str(row.get("Booked", "")).upper() == "TRUE":
+    for row in _bd_rows[2:]:
+        if not row:
+            continue
+        name = str(row[col.get("User", 0)]).strip() if col.get("User", 0) < len(row) else ""
+        booked = str(row[col.get("Booked", 7)]).upper() if col.get("Booked", 7) < len(row) else ""
+        if name and booked == "TRUE":
             stats[name] = stats.get(name, 0) + 1
     return stats
 
 def tr_get_student_bookings(user_name: str) -> list:
     _ensure_bd()
-    return [r for r in _bd_rows
-            if r.get("User") == user_name and str(r.get("Booked", "")).upper() == "TRUE"]
+    if len(_bd_rows) < 2:
+        return []
+    hdr = _bd_rows[1]
+    col = {h: i for i, h in enumerate(hdr)}
+    result = []
+    for row in _bd_rows[2:]:
+        if not row:
+            continue
+        name = str(row[col.get("User", 0)]).strip() if col.get("User", 0) < len(row) else ""
+        booked = str(row[col.get("Booked", 7)]).upper() if col.get("Booked", 7) < len(row) else ""
+        if name == user_name and booked == "TRUE":
+            result.append(row)
+    return result
 
 # ═══════════════════════════════════════════════════════════════
 # БРОНИРОВАНИЕ В ЛИСТЕ 2026
@@ -854,13 +872,18 @@ def kb_trainer_schedule():
 def kb_trainer_day_list(prefix: str):
     b = InlineKeyboardBuilder()
     _ensure_bd()
-    seen = []
-    for row in _bd_rows:
-        d = row.get("Date", "")
-        day = row.get("Day", "")
-        if d and d not in seen:
-            seen.append(d)
-            b.button(text=f"{day} {d}", callback_data=f"{prefix}{d}")
+    if len(_bd_rows) >= 2:
+        hdr = _bd_rows[1]
+        col = {h: i for i, h in enumerate(hdr)}
+        seen = []
+        for row in _bd_rows[2:]:
+            if not row:
+                continue
+            d   = str(row[col.get("Date", 1)]).strip() if col.get("Date", 1) < len(row) else ""
+            day = str(row[col.get("Day",  2)]).strip() if col.get("Day",  2) < len(row) else ""
+            if d and d not in seen:
+                seen.append(d)
+                b.button(text=f"{day} {d}", callback_data=f"{prefix}{d}")
     b.button(text="◀️ Назад", callback_data="tr_schedule")
     b.adjust(1)
     return b.as_markup()
@@ -1326,9 +1349,15 @@ async def cb_tr_results(callback: CallbackQuery):
     name = callback.data[len("tr_results_"):]
     _ensure_bd()
     lines = []
-    for row in _bd_rows:
-        if row.get("User") == name and str(row.get("Booked", "")).upper() == "TRUE":
-            date = row.get("Date", "")
+    hdr = _bd_rows[1] if len(_bd_rows) >= 2 else []
+    col = {h: i for i, h in enumerate(hdr)}
+    for row in (_bd_rows[2:] if len(_bd_rows) >= 2 else []):
+        if not row:
+            continue
+        r_user   = str(row[col.get("User",   0)]).strip() if col.get("User",   0) < len(row) else ""
+        r_booked = str(row[col.get("Booked", 7)]).upper() if col.get("Booked", 7) < len(row) else ""
+        if r_user == name and r_booked == "TRUE":
+            date = str(row[col.get("Date", 1)]).strip() if col.get("Date", 1) < len(row) else ""
             rows_src = find_date_rows(date)
             state_val = ""
             if rows_src:
@@ -1690,7 +1719,7 @@ async def cb_toggle_day(callback: CallbackQuery):
         _ensure_bd()
         trains = get_schedule_for_user(user_name or "")
         t = next((x for x in trains if x["date"] == date_str), None)
-        if t and not t["time"]:
+        if t and (not t["time"] or t["remote"]):
             sel[date_str] = "remote"   # remote-only день — сразу как удалённо
         else:
             sel[date_str] = "pending"  # бассейновый день — показываем выбор типа
