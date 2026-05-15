@@ -818,9 +818,15 @@ def kb_trainer_menu():
     b.button(text="👥 Ученики",      callback_data="tr_students")
     b.button(text="📢 Рассылка",     callback_data="tr_broadcast")
     b.button(text="📊 Статистика",   callback_data="tr_stats")
-    b.button(text="👁 Мой вид",       callback_data="tr_view_select")
-    b.adjust(2, 2, 1)
+    b.adjust(2, 2)
     return b.as_markup()
+
+def kb_persistent_trainer():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🏠 Главное меню"),
+                   KeyboardButton(text="👁 Мой вид")]],
+        resize_keyboard=True,
+    )
 
 def kb_persistent_exit():
     return ReplyKeyboardMarkup(
@@ -937,7 +943,7 @@ dp  = Dispatcher()
 async def cmd_start(message: Message):
     uid = message.from_user.id
     if is_trainer(uid):
-        await message.answer("—", reply_markup=kb_persistent())
+        await message.answer("—", reply_markup=kb_persistent_trainer())
         await message.answer_photo(photo=FSInputFile("logo.png"),
             caption="🎓 *Панель тренера*", reply_markup=kb_trainer_menu(), parse_mode="Markdown")
         return
@@ -954,6 +960,7 @@ async def cmd_start(message: Message):
 async def btn_start(message: Message):
     uid = message.from_user.id
     if is_trainer(uid):
+        await message.answer("—", reply_markup=kb_persistent_trainer())
         await message.answer_photo(photo=FSInputFile("logo.png"),
             caption="🎓 *Панель тренера*", reply_markup=kb_trainer_menu(), parse_mode="Markdown")
         return
@@ -969,7 +976,7 @@ async def btn_start(message: Message):
 @dp.message(F.text == "🏠 Главное меню")
 async def btn_main_menu(message: Message):
     uid = message.from_user.id
-    if is_trainer(uid):
+    if is_trainer(uid) and uid not in _trainer_view_as:
         await message.answer_photo(photo=FSInputFile("logo.png"),
             caption="🎓 *Панель тренера*", reply_markup=kb_trainer_menu(), parse_mode="Markdown")
         return
@@ -1032,11 +1039,27 @@ async def cb_tr_view_select(callback: CallbackQuery):
     try: await callback.answer()
     except: pass
 
+@dp.message(F.text == "👁 Мой вид")
+async def btn_my_view(message: Message):
+    uid = message.from_user.id
+    if not is_trainer(uid): return
+    name = _user_cache.get(uid)
+    if not name:
+        await message.reply("Вы не зарегистрированы как ученик.")
+        return
+    _trainer_view_as[uid] = name
+    await message.answer("—", reply_markup=kb_persistent_exit())
+    await message.answer_photo(
+        photo=FSInputFile("logo.png"),
+        caption=f"👁 *Просмотр как {name}*",
+        reply_markup=kb_main_menu(),
+        parse_mode="Markdown")
+
 @dp.message(F.text == "🔙 Выйти из просмотра")
 async def btn_exit_view(message: Message):
     uid = message.from_user.id
     _trainer_view_as.pop(uid, None)
-    await message.answer("—", reply_markup=kb_persistent())
+    await message.answer("—", reply_markup=kb_persistent_trainer())
     await message.answer_photo(
         photo=FSInputFile("logo.png"),
         caption="🎓 *Панель тренера*",
@@ -1066,7 +1089,7 @@ async def cmd_trainer(message: Message):
     if not is_trainer(uid): return
     _trainer_view_as.pop(uid, None)
     _trainer_state.pop(uid, None)
-    await message.answer("—", reply_markup=kb_persistent())
+    await message.answer("—", reply_markup=kb_persistent_trainer())
     await message.answer_photo(
         photo=FSInputFile("logo.png"),
         caption="🎓 *Панель тренера*",
