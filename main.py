@@ -25,7 +25,8 @@ load_dotenv()
 
 TOKEN          = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-TRAINER_ID     = int(os.getenv("TRAINER_ID", "0"))
+TRAINER_ID       = int(os.getenv("TRAINER_ID", "0"))
+TRAINER_PASSWORD = os.getenv("TRAINER_PASSWORD", "")
 BOT_TIMEZONE   = os.getenv("BOT_TIMEZONE", "Europe/Moscow")
 BOT_TZ         = ZoneInfo(BOT_TIMEZONE)
 
@@ -187,6 +188,8 @@ _state_date:          str            = ""    # дата для сброса _sta
 _multi_select:        dict[int, dict[str, str]] = {}  # telegram_id → {date: "pool"|"remote"|"pending"}
 _known_grades:        dict[str, str]            = {}  # имя → текущий грейд плавания
 _known_dnf_grades:    dict[str, str]            = {}  # имя → текущий DNF/DYN грейд
+_authenticated_trainers: set[int]              = set()  # trainer IDs прошедших авторизацию
+_trainer_state:          dict[int, dict]       = {}     # {user_id: {action, ...}} для многошаговых потоков
 BD_TTL = 300                                 # секунд (5 минут)
 
 STATES = [
@@ -586,6 +589,114 @@ def sync_bd():
         bd.update(records, "A3")
 
 # ═══════════════════════════════════════════════════════════════
+# ТРЕНЕР — ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ═══════════════════════════════════════════════════════════════
+
+def is_trainer(user_id: int) -> bool:
+    return user_id == TRAINER_ID or user_id in _authenticated_trainers
+
+def tr_find_next_week_row() -> int:
+    """Находит строку (0-based) блока Забронировать следующей недели."""
+    if _week_marker_row == -1:
+        return -1
+    data = get_source_sheet().get_all_values()
+    for i in range(_week_marker_row + 35, min(_week_marker_row + 55, len(data))):
+        if len(data[i]) <= 3:
+            continue
+        d_val = str(data[i][3]).strip().upper()
+        last  = str(data[i][-1]).strip().lower()
+        if d_val in ("TRUE", "FALSE") and "текущ" not in last:
+            return i
+    return -1
+
+def tr_close_current_week() -> bool:
+    if _week_marker_row == -1:
+        return False
+    src  = get_source_sheet()
+    data = src.get_all_values()
+    row  = data[_week_marker_row]
+    last_col = len(row)
+    src.update(gspread.utils.rowcol_to_a1(_week_marker_row + 1, last_col), [[""]])
+    _invalidate_bd()
+    return True
+
+def tr_open_next_week() -> str:
+    row = tr_find_next_week_row()
+    if row == -1:
+        return "Следующая неделя не найдена"
+    src  = get_source_sheet()
+    data = src.get_all_values()
+    if _week_marker_row != -1:
+        cur_last = len(data[_week_marker_row])
+        src.update(gspread.utils.rowcol_to_a1(_week_marker_row + 1, cur_last), [[""]])
+    nxt_last = len(data[row])
+    src.update(gspread.utils.rowcol_to_a1(row + 1, nxt_last), [["текущая неделя"]])
+    _invalidate_bd()
+    return "ok"
+
+def tr_set_time(date_str: str, time_str: str) -> bool:
+    rows = find_date_rows(date_str)
+    if not rows:
+        return False
+    get_source_sheet().update(f"B{rows['vol']}", [[time_str]])
+    _invalidate_bd()
+    return True
+
+def tr_cancel_day(date_str: str) -> bool:
+    return tr_set_time(date_str, "нет тренировки")
+
+def tr_get_subscription(user_name: str) -> int:
+    try:
+        val = get_source_sheet().acell(f"{USER_COLUMNS[user_name]}9").value
+        return int(float(str(val or "0")))
+    except Exception:
+        return 0
+
+def tr_set_subscription(user_name: str, value: int) -> bool:
+    try:
+        get_source_sheet().update(f"{USER_COLUMNS[user_name]}9", [[value]])
+        return True
+    except Exception:
+        return False
+
+def tr_set_grade(user_name: str, swim: str = None, dnf: str = None) -> bool:
+    try:
+        ws   = get_grade_current_sheet()
+        rows = ws.get_all_values()
+        for i, row in enumerate(rows):
+            if row and row[0].strip() == user_name:
+                if swim is not None:
+                    ws.update(f"B{i+1}", [[swim]])
+                    _known_grades[user_name] = swim
+                if dnf is not None:
+                    ws.update(f"C{i+1}", [[dnf]])
+                    _known_dnf_grades[user_name] = dnf
+                return True
+        swim_v = swim if swim is not None else _known_grades.get(user_name, "")
+        dnf_v  = dnf  if dnf  is not None else _known_dnf_grades.get(user_name, "")
+        ws.append_row([user_name, swim_v, dnf_v])
+        if swim is not None: _known_grades[user_name] = swim
+        if dnf  is not None: _known_dnf_grades[user_name] = dnf
+        return True
+    except Exception as e:
+        print(f"tr_set_grade ошибка: {e}")
+        return False
+
+def tr_get_week_stats() -> dict:
+    _ensure_bd()
+    stats: dict[str, int] = {}
+    for row in _bd_rows:
+        name = str(row.get("User", "")).strip()
+        if name and str(row.get("Booked", "")).upper() == "TRUE":
+            stats[name] = stats.get(name, 0) + 1
+    return stats
+
+def tr_get_student_bookings(user_name: str) -> list:
+    _ensure_bd()
+    return [r for r in _bd_rows
+            if r.get("User") == user_name and str(r.get("Booked", "")).upper() == "TRUE"]
+
+# ═══════════════════════════════════════════════════════════════
 # БРОНИРОВАНИЕ В ЛИСТЕ 2026
 # ═══════════════════════════════════════════════════════════════
 
@@ -688,6 +799,122 @@ def kb_user_list():
     return b.as_markup()
 
 # ═══════════════════════════════════════════════════════════════
+# ТРЕНЕР — КЛАВИАТУРЫ
+# ═══════════════════════════════════════════════════════════════
+
+def kb_role_select():
+    b = InlineKeyboardBuilder()
+    b.button(text="🏊 Спортсмен", callback_data="role_student")
+    b.button(text="🎓 Тренер",    callback_data="role_trainer")
+    b.adjust(2)
+    return b.as_markup()
+
+def kb_trainer_menu():
+    b = InlineKeyboardBuilder()
+    b.button(text="📅 Расписание", callback_data="tr_schedule")
+    b.button(text="👥 Ученики",    callback_data="tr_students")
+    b.button(text="📢 Рассылка",   callback_data="tr_broadcast")
+    b.button(text="📊 Статистика", callback_data="tr_stats")
+    b.adjust(2, 2)
+    return b.as_markup()
+
+def kb_trainer_schedule():
+    week_active = _week_marker_row != -1
+    b = InlineKeyboardBuilder()
+    if week_active:
+        b.button(text="⏹ Закрыть текущую неделю",  callback_data="tr_close_week")
+    b.button(text="▶️ Открыть следующую неделю", callback_data="tr_open_week")
+    b.button(text="⏰ Поставить время",           callback_data="tr_settime_select")
+    b.button(text="❌ Отменить тренировку",        callback_data="tr_cancel_select")
+    b.button(text="◀️ Назад",                     callback_data="tr_menu")
+    b.adjust(1)
+    return b.as_markup()
+
+def kb_trainer_day_list(prefix: str):
+    b = InlineKeyboardBuilder()
+    _ensure_bd()
+    seen = []
+    for row in _bd_rows:
+        d = row.get("Date", "")
+        day = row.get("Day", "")
+        if d and d not in seen:
+            seen.append(d)
+            b.button(text=f"{day} {d}", callback_data=f"{prefix}{d}")
+    b.button(text="◀️ Назад", callback_data="tr_schedule")
+    b.adjust(1)
+    return b.as_markup()
+
+def kb_trainer_students():
+    b = InlineKeyboardBuilder()
+    for name in USER_COLUMNS:
+        grade = _known_grades.get(name, "")
+        label = f"{name}  {grade}".strip() if grade else name
+        b.button(text=label, callback_data=f"tr_student_{name}")
+    b.button(text="◀️ Назад", callback_data="tr_menu")
+    b.adjust(2)
+    return b.as_markup()
+
+def kb_trainer_student(name: str):
+    b = InlineKeyboardBuilder()
+    b.button(text="📋 Брони",          callback_data=f"tr_bookings_{name}")
+    b.button(text="🎫 Абонемент",       callback_data=f"tr_sub_{name}")
+    b.button(text="🏊 Грейд плавание",  callback_data=f"tr_grade_swim_{name}")
+    b.button(text="🤿 Грейд DNF/DYN",  callback_data=f"tr_grade_dnf_{name}")
+    b.button(text="📊 Состояния",       callback_data=f"tr_results_{name}")
+    b.button(text="◀️ Назад",           callback_data="tr_students")
+    b.adjust(2, 2, 1, 1)
+    return b.as_markup()
+
+def kb_trainer_swim_grades(name: str):
+    b = InlineKeyboardBuilder()
+    current = _known_grades.get(name, "")
+    for i, g in enumerate(SWIM_GRADE_ORDER):
+        label = f"✅ {g}" if g == current else g
+        b.button(text=label, callback_data=f"tr_setswim_{i}_{name}")
+    b.button(text="◀️ Назад", callback_data=f"tr_grade_swim_{name}")
+    b.adjust(1)
+    return b.as_markup()
+
+def kb_trainer_dnf_grades(name: str):
+    b = InlineKeyboardBuilder()
+    current = _known_dnf_grades.get(name, "")
+    for i, g in enumerate(DNF_GRADE_ORDER):
+        label = f"✅ {g}" if g == current else g
+        b.button(text=label, callback_data=f"tr_setdnf_{i}_{name}")
+    b.button(text="🗑 Убрать DNF",  callback_data=f"tr_setdnf_clear_{name}")
+    b.button(text="◀️ Назад",       callback_data=f"tr_grade_dnf_{name}")
+    b.adjust(1)
+    return b.as_markup()
+
+def kb_trainer_sub(name: str):
+    b = InlineKeyboardBuilder()
+    for delta in (+10, +5, +1, -1, -5, -10):
+        sign = "+" if delta > 0 else ""
+        b.button(text=f"{sign}{delta}", callback_data=f"tr_subdelta_{name}_{delta}")
+    b.button(text="◀️ Назад", callback_data=f"tr_student_{name}")
+    b.adjust(3, 3, 1)
+    return b.as_markup()
+
+def kb_trainer_broadcast():
+    b = InlineKeyboardBuilder()
+    b.button(text="📢 Всем ученикам",    callback_data="tr_broadcast_all")
+    b.button(text="👤 Выбрать учеников", callback_data="tr_broadcast_select")
+    b.button(text="◀️ Назад",             callback_data="tr_menu")
+    b.adjust(1)
+    return b.as_markup()
+
+def kb_trainer_broadcast_select(selected: list):
+    b = InlineKeyboardBuilder()
+    for name in USER_COLUMNS:
+        mark = "✅ " if name in selected else ""
+        b.button(text=f"{mark}{name}", callback_data=f"tr_bsel_{name}")
+    if selected:
+        b.button(text=f"📢 Отправить ({len(selected)})", callback_data="tr_bsend")
+    b.button(text="◀️ Назад", callback_data="tr_broadcast")
+    b.adjust(3)
+    return b.as_markup()
+
+# ═══════════════════════════════════════════════════════════════
 # БОТ
 # ═══════════════════════════════════════════════════════════════
 
@@ -697,53 +924,458 @@ dp  = Dispatcher()
 # ── /start ──────────────────────────────────────────────────────
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    user_name = get_user_name_by_telegram_id(message.from_user.id)
+    uid = message.from_user.id
+    if is_trainer(uid):
+        await message.answer("—", reply_markup=kb_persistent())
+        await message.answer_photo(photo=FSInputFile("logo.png"),
+            caption="🎓 *Панель тренера*", reply_markup=kb_trainer_menu(), parse_mode="Markdown")
+        return
+    user_name = get_user_name_by_telegram_id(uid)
     if user_name:
         await message.answer("—", reply_markup=kb_persistent())
-        await message.answer_photo(
-            photo=FSInputFile("logo.png"),
-            caption=f"Привет, {user_name} 👋",
-            reply_markup=kb_main_menu(),
-        )
+        await message.answer_photo(photo=FSInputFile("logo.png"),
+            caption=f"Привет, {user_name} 👋", reply_markup=kb_main_menu())
     else:
-        await message.answer_photo(
-            photo=FSInputFile("logo.png"),
-            caption="Добро пожаловать 👋\nНажмите кнопку ниже чтобы начать.",
-            reply_markup=kb_start(),
-        )
+        await message.answer_photo(photo=FSInputFile("logo.png"),
+            caption="👋 Добро пожаловать!\n\nКто вы?", reply_markup=kb_role_select())
 
 @dp.message(F.text == "🚀 Начать пользоваться")
 async def btn_start(message: Message):
-    user_name = get_user_name_by_telegram_id(message.from_user.id)
+    uid = message.from_user.id
+    if is_trainer(uid):
+        await message.answer_photo(photo=FSInputFile("logo.png"),
+            caption="🎓 *Панель тренера*", reply_markup=kb_trainer_menu(), parse_mode="Markdown")
+        return
+    user_name = get_user_name_by_telegram_id(uid)
     if user_name:
         await message.answer("—", reply_markup=kb_persistent())
-        await message.answer_photo(
-            photo=FSInputFile("logo.png"),
-            caption=f"Привет, {user_name} 👋",
-            reply_markup=kb_main_menu(),
-        )
+        await message.answer_photo(photo=FSInputFile("logo.png"),
+            caption=f"Привет, {user_name} 👋", reply_markup=kb_main_menu())
         return
-    await message.answer_photo(
-        photo=FSInputFile("logo.png"),
-        caption="Выберите своё имя из списка:",
-        reply_markup=kb_user_list(),
-    )
+    await message.answer_photo(photo=FSInputFile("logo.png"),
+        caption="Выберите своё имя из списка:", reply_markup=kb_user_list())
 
 @dp.message(F.text == "🏠 Главное меню")
 async def btn_main_menu(message: Message):
-    user_name = get_user_name_by_telegram_id(message.from_user.id)
+    uid = message.from_user.id
+    if is_trainer(uid):
+        await message.answer_photo(photo=FSInputFile("logo.png"),
+            caption="🎓 *Панель тренера*", reply_markup=kb_trainer_menu(), parse_mode="Markdown")
+        return
+    user_name = get_user_name_by_telegram_id(uid)
     if user_name:
-        await message.answer_photo(
-            photo=FSInputFile("logo.png"),
-            caption=f"Привет, {user_name} 👋",
-            reply_markup=kb_main_menu(),
-        )
+        await message.answer_photo(photo=FSInputFile("logo.png"),
+            caption=f"Привет, {user_name} 👋", reply_markup=kb_main_menu())
     else:
-        await message.answer_photo(
-            photo=FSInputFile("logo.png"),
-            caption="Выберите своё имя из списка:",
-            reply_markup=kb_user_list(),
-        )
+        await message.answer_photo(photo=FSInputFile("logo.png"),
+            caption="Выберите своё имя из списка:", reply_markup=kb_user_list())
+
+# ── Выбор роли ──────────────────────────────────────────────────
+@dp.callback_query(F.data == "role_student")
+async def cb_role_student(callback: CallbackQuery):
+    await callback.message.edit_caption(caption="Выберите своё имя из списка:", reply_markup=kb_user_list())
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data == "role_trainer")
+async def cb_role_trainer(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if uid == TRAINER_ID:
+        _authenticated_trainers.add(uid)
+        await callback.message.edit_caption(caption="🎓 *Панель тренера*",
+            reply_markup=kb_trainer_menu(), parse_mode="Markdown")
+    elif TRAINER_PASSWORD:
+        _trainer_state[uid] = {"action": "waiting_password"}
+        b = InlineKeyboardBuilder()
+        b.button(text="◀️ Назад", callback_data="tr_back_role")
+        await callback.message.edit_caption(caption="🔐 Введите пароль тренера:", reply_markup=b.as_markup())
+    else:
+        await callback.message.edit_caption(caption="❌ Доступ запрещён.", reply_markup=kb_role_select())
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data == "tr_back_role")
+async def cb_tr_back_role(callback: CallbackQuery):
+    _trainer_state.pop(callback.from_user.id, None)
+    await callback.message.edit_caption(caption="👋 Добро пожаловать!\n\nКто вы?", reply_markup=kb_role_select())
+    try: await callback.answer()
+    except: pass
+
+# ── Панель тренера — главное меню ───────────────────────────────
+@dp.callback_query(F.data == "tr_menu")
+async def cb_tr_menu(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id):
+        try: await callback.answer("Доступ запрещён", show_alert=True)
+        except: pass
+        return
+    try:
+        week_label = get_bd_sheet().acell("A1").value or "не активна"
+    except Exception:
+        week_label = "не активна"
+    await callback.message.edit_caption(
+        caption=f"🎓 *Панель тренера*\n\n📅 {week_label}",
+        reply_markup=kb_trainer_menu(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+# ── Расписание ──────────────────────────────────────────────────
+@dp.callback_query(F.data == "tr_schedule")
+async def cb_tr_schedule(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    _ensure_bd()
+    try:
+        week_label = get_bd_sheet().acell("A1").value or ""
+    except Exception:
+        week_label = ""
+    status = f"🟢 {week_label}" if _week_marker_row != -1 else "🔴 Неделя не активна"
+    await callback.message.edit_caption(
+        caption=f"📅 *Расписание*\n\n{status}",
+        reply_markup=kb_trainer_schedule(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data == "tr_close_week")
+async def cb_tr_close_week(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    ok  = tr_close_current_week()
+    msg = "✅ Неделя закрыта" if ok else "❌ Нет активной недели"
+    await callback.message.edit_caption(caption=msg, reply_markup=kb_trainer_schedule())
+    try: await callback.answer(msg)
+    except: pass
+
+@dp.callback_query(F.data == "tr_open_week")
+async def cb_tr_open_week(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    result = tr_open_next_week()
+    msg    = "✅ Следующая неделя открыта" if result == "ok" else f"❌ {result}"
+    await callback.message.edit_caption(caption=msg, reply_markup=kb_trainer_schedule())
+    try: await callback.answer(msg)
+    except: pass
+
+@dp.callback_query(F.data == "tr_settime_select")
+async def cb_tr_settime_select(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    await callback.message.edit_caption(
+        caption="⏰ Выберите день для установки времени:",
+        reply_markup=kb_trainer_day_list("tr_settime_day_"))
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_settime_day_"))
+async def cb_tr_settime_day(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    date_str = callback.data[len("tr_settime_day_"):]
+    _trainer_state[callback.from_user.id] = {"action": "set_time", "date": date_str}
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ Назад", callback_data="tr_settime_select")
+    await callback.message.edit_caption(
+        caption=f"⏰ Введите время для *{date_str}*\n\nНапример: `7:30` или `нет тренировки`",
+        reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data == "tr_cancel_select")
+async def cb_tr_cancel_select(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    await callback.message.edit_caption(
+        caption="❌ Выберите день для отмены тренировки:",
+        reply_markup=kb_trainer_day_list("tr_cancelday_"))
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_cancelday_"))
+async def cb_tr_cancelday(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    date_str = callback.data[len("tr_cancelday_"):]
+    ok  = tr_cancel_day(date_str)
+    msg = f"✅ Тренировка {date_str} отменена" if ok else "❌ Не удалось отменить"
+    await callback.message.edit_caption(caption=msg, reply_markup=kb_trainer_schedule())
+    try: await callback.answer(msg)
+    except: pass
+
+# ── Ученики ─────────────────────────────────────────────────────
+@dp.callback_query(F.data == "tr_students")
+async def cb_tr_students(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    await callback.message.edit_caption(
+        caption="👥 *Ученики*\n\nВыберите ученика:",
+        reply_markup=kb_trainer_students(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_student_") & ~F.data.startswith("tr_students"))
+async def cb_tr_student(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    name = callback.data[len("tr_student_"):]
+    if name not in USER_COLUMNS:
+        try: await callback.answer("Ученик не найден")
+        except: pass
+        return
+    sub  = tr_get_subscription(name)
+    swim = _known_grades.get(name, "—")
+    dnf  = _known_dnf_grades.get(name, "")
+    text = (f"👤 *{name}*\n\n"
+            f"🎫 Абонемент: *{sub}* тр.\n"
+            f"🏊 Плавание: {swim or '—'}\n"
+            + (f"🤿 DNF/DYN: {dnf}\n" if dnf else ""))
+    await callback.message.edit_caption(caption=text, reply_markup=kb_trainer_student(name), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_bookings_"))
+async def cb_tr_bookings(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    name     = callback.data[len("tr_bookings_"):]
+    bookings = tr_get_student_bookings(name)
+    if bookings:
+        lines = [f"• {r.get('Day','')} {r.get('Date','')} {r.get('Time','')}".strip() for r in bookings]
+        text  = f"📋 *Брони {name}:*\n\n" + "\n".join(lines)
+    else:
+        text = f"📋 *{name}*\n\nЗаписей на эту неделю нет"
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ Назад", callback_data=f"tr_student_{name}")
+    await callback.message.edit_caption(caption=text, reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_sub_"))
+async def cb_tr_sub(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    name    = callback.data[len("tr_sub_"):]
+    current = tr_get_subscription(name)
+    await callback.message.edit_caption(
+        caption=f"🎫 *Абонемент — {name}*\n\nОстаток: *{current}* тренировок",
+        reply_markup=kb_trainer_sub(name), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_subdelta_"))
+async def cb_tr_subdelta(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    rest  = callback.data[len("tr_subdelta_"):]
+    delta = int(rest.rsplit("_", 1)[1])
+    name  = rest.rsplit("_", 1)[0]
+    new_val = tr_get_subscription(name) + delta
+    tr_set_subscription(name, new_val)
+    sign = "+" if delta > 0 else ""
+    await callback.message.edit_caption(
+        caption=f"🎫 *Абонемент — {name}*\n\nОстаток: *{new_val}* тренировок",
+        reply_markup=kb_trainer_sub(name), parse_mode="Markdown")
+    try: await callback.answer(f"{sign}{delta} → {new_val}")
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_grade_swim_"))
+async def cb_tr_grade_swim(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    name    = callback.data[len("tr_grade_swim_"):]
+    current = _known_grades.get(name, "не задан")
+    await callback.message.edit_caption(
+        caption=f"🏊 *Грейд плавания — {name}*\n\nТекущий: {current}",
+        reply_markup=kb_trainer_swim_grades(name), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_setswim_"))
+async def cb_tr_setswim(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    parts = callback.data[len("tr_setswim_"):].split("_", 1)
+    idx, name = int(parts[0]), parts[1]
+    grade = SWIM_GRADE_ORDER[idx]
+    tr_set_grade(name, swim=grade)
+    save_grade_history(name, grade)
+    await callback.message.edit_caption(
+        caption=f"🏊 *Грейд плавания — {name}*\n\nТекущий: {grade}",
+        reply_markup=kb_trainer_swim_grades(name), parse_mode="Markdown")
+    try: await callback.answer(f"✅ {grade}")
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_grade_dnf_"))
+async def cb_tr_grade_dnf(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    name    = callback.data[len("tr_grade_dnf_"):]
+    current = _known_dnf_grades.get(name, "не задан")
+    await callback.message.edit_caption(
+        caption=f"🤿 *Грейд DNF/DYN — {name}*\n\nТекущий: {current}",
+        reply_markup=kb_trainer_dnf_grades(name), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_setdnf_"))
+async def cb_tr_setdnf(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    rest = callback.data[len("tr_setdnf_"):]
+    if rest.startswith("clear_"):
+        name  = rest[len("clear_"):]
+        grade = ""
+    else:
+        parts = rest.split("_", 1)
+        idx, name = int(parts[0]), parts[1]
+        grade = DNF_GRADE_ORDER[idx]
+    tr_set_grade(name, dnf=grade)
+    if grade:
+        save_grade_history(name, grade)
+    display = grade or "не задан"
+    await callback.message.edit_caption(
+        caption=f"🤿 *Грейд DNF/DYN — {name}*\n\nТекущий: {display}",
+        reply_markup=kb_trainer_dnf_grades(name), parse_mode="Markdown")
+    try: await callback.answer(f"✅ {display}")
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_results_"))
+async def cb_tr_results(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    name = callback.data[len("tr_results_"):]
+    _ensure_bd()
+    lines = []
+    for row in _bd_rows:
+        if row.get("User") == name and str(row.get("Booked", "")).upper() == "TRUE":
+            date = row.get("Date", "")
+            rows_src = find_date_rows(date)
+            state_val = ""
+            if rows_src:
+                try:
+                    state_row = rows_src["bron"] + 4
+                    state_val = get_source_sheet().acell(f"{USER_COLUMNS[name]}{state_row}").value or ""
+                except Exception:
+                    pass
+            if state_val and state_val != "-":
+                lines.append(f"• {date}: {state_val}")
+    text = (f"📊 *Состояния — {name}:*\n\n" + "\n".join(lines[-10:])) if lines \
+           else f"📊 *{name}*\n\nОценок пока нет"
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ Назад", callback_data=f"tr_student_{name}")
+    await callback.message.edit_caption(caption=text, reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+# ── Рассылка ────────────────────────────────────────────────────
+@dp.callback_query(F.data == "tr_broadcast")
+async def cb_tr_broadcast(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    await callback.message.edit_caption(
+        caption="📢 *Рассылка*\n\nВыберите получателей:",
+        reply_markup=kb_trainer_broadcast(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data == "tr_broadcast_all")
+async def cb_tr_broadcast_all(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    _trainer_state[callback.from_user.id] = {"action": "broadcast", "recipients": list(USER_COLUMNS.keys())}
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ Отмена", callback_data="tr_broadcast")
+    await callback.message.edit_caption(
+        caption=f"📢 *Рассылка всем ({len(USER_COLUMNS)})*\n\nВведите текст сообщения:",
+        reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data == "tr_broadcast_select")
+async def cb_tr_broadcast_select(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    state = _trainer_state.get(callback.from_user.id, {})
+    if state.get("action") != "broadcast_select":
+        _trainer_state[callback.from_user.id] = {"action": "broadcast_select", "selected": []}
+    selected = _trainer_state[callback.from_user.id].get("selected", [])
+    await callback.message.edit_caption(
+        caption=f"👤 Выберите учеников ({len(selected)} выбрано):",
+        reply_markup=kb_trainer_broadcast_select(selected))
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_bsel_"))
+async def cb_tr_bsel(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    name  = callback.data[len("tr_bsel_"):]
+    state = _trainer_state.setdefault(callback.from_user.id, {"action": "broadcast_select", "selected": []})
+    selected = state.setdefault("selected", [])
+    if name in selected:
+        selected.remove(name)
+    else:
+        selected.append(name)
+    await callback.message.edit_caption(
+        caption=f"👤 Выберите учеников ({len(selected)} выбрано):",
+        reply_markup=kb_trainer_broadcast_select(selected))
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data == "tr_bsend")
+async def cb_tr_bsend(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    state    = _trainer_state.get(callback.from_user.id, {})
+    selected = state.get("selected", [])
+    if not selected:
+        try: await callback.answer("Никого не выбрано", show_alert=True)
+        except: pass
+        return
+    _trainer_state[callback.from_user.id] = {"action": "broadcast", "recipients": selected}
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ Отмена", callback_data="tr_broadcast_select")
+    await callback.message.edit_caption(
+        caption=f"📢 Рассылка *{len(selected)}* ученикам\n\nВведите текст:",
+        reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+# ── Статистика ──────────────────────────────────────────────────
+@dp.callback_query(F.data == "tr_stats")
+async def cb_tr_stats(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    stats = tr_get_week_stats()
+    if stats:
+        lines = [f"• {n}: {c} тр." for n, c in sorted(stats.items(), key=lambda x: -x[1])]
+        text  = (f"📊 *Статистика недели*\n\n"
+                 f"Всего записей: {sum(stats.values())}\n"
+                 f"Активных: {len(stats)}/{len(USER_COLUMNS)}\n\n"
+                 + "\n".join(lines))
+    else:
+        text = "📊 *Статистика*\n\nДанных нет"
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ Назад", callback_data="tr_menu")
+    await callback.message.edit_caption(caption=text, reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+# ── Текстовые сообщения тренера (пароль, рассылка, время) ───────
+@dp.message(lambda m: m.from_user.id in _trainer_state)
+async def handle_trainer_input(message: Message):
+    uid   = message.from_user.id
+    state = _trainer_state.get(uid, {})
+    action = state.get("action", "")
+
+    if action == "waiting_password":
+        if message.text and message.text.strip() == TRAINER_PASSWORD:
+            _authenticated_trainers.add(uid)
+            _trainer_state.pop(uid, None)
+            await message.answer("—", reply_markup=kb_persistent())
+            await message.answer_photo(photo=FSInputFile("logo.png"),
+                caption="✅ *Добро пожаловать в панель тренера!*",
+                reply_markup=kb_trainer_menu(), parse_mode="Markdown")
+        else:
+            await message.reply("❌ Неверный пароль. Попробуйте ещё раз:")
+
+    elif action == "broadcast":
+        text       = message.text or ""
+        recipients = state.get("recipients", [])
+        _trainer_state.pop(uid, None)
+        sent = 0
+        for name in recipients:
+            try:
+                await notify_user(name, f"📢 *Сообщение от тренера:*\n\n{text}", parse_mode="Markdown")
+                sent += 1
+            except Exception:
+                pass
+        await message.reply(f"✅ Отправлено {sent}/{len(recipients)} ученикам")
+
+    elif action == "set_time":
+        date_str = state.get("date", "")
+        time_str = (message.text or "").strip()
+        _trainer_state.pop(uid, None)
+        ok = tr_set_time(date_str, time_str)
+        if ok:
+            await message.reply(f"✅ Время для *{date_str}* установлено: `{time_str}`", parse_mode="Markdown")
+        else:
+            await message.reply(f"❌ Не удалось обновить время для {date_str}")
 
 # ── Выбор имени ─────────────────────────────────────────────────
 @dp.callback_query(F.data.startswith("user_"))
