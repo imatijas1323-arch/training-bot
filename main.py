@@ -919,6 +919,92 @@ def tr_get_student_bookings(user_name: str) -> list:
             result.append(row)
     return result
 
+def tr_get_training_week_data() -> dict:
+    """Данные по дням текущей недели: {date: {day_short, time, is_no_train, is_remote, participants}}"""
+    _ensure_bd()
+    if len(_bd_rows) < 2:
+        return {}
+    hdr = _bd_rows[1]
+    col = {h: i for i, h in enumerate(hdr)}
+    days_ordered = tr_get_current_week_days()
+    result = {}
+    for day_info in days_ordered:
+        date_str = day_info["date"]
+        if not date_str:
+            continue
+        participants = []
+        for row in _bd_rows[2:]:
+            if not row or col.get("Date", 1) >= len(row):
+                continue
+            if row[col["Date"]].strip() != date_str:
+                continue
+            if str(row[col.get("Booked", 7)]).upper() != "TRUE":
+                continue
+            participants.append({
+                "name":   str(row[col.get("User",   0)]).strip() if col.get("User",   0) < len(row) else "",
+                "plan":   str(row[col.get("Plan",   4)]).strip() if col.get("Plan",   4) < len(row) else "",
+                "volume": str(row[col.get("Volume", 5)]).strip() if col.get("Volume", 5) < len(row) else "",
+                "remote": str(row[col.get("Remote", 6)]).lower() == "yes" if col.get("Remote", 6) < len(row) else False,
+            })
+        result[date_str] = {
+            "day_short":   day_info["day_short"],
+            "time":        day_info["time"],
+            "is_no_train": day_info["is_no_train"],
+            "is_remote":   day_info["is_remote"],
+            "participants": participants,
+        }
+    return result
+
+def tr_write_plan_for_date(date_str: str, plan_text: str) -> int:
+    """Записывает план всем забронировавшим на указанную дату. Возвращает кол-во записей."""
+    rows = find_date_rows(date_str)
+    if not rows:
+        return 0
+    plan_row_1based = rows["bron"] + 1
+    _ensure_bd()
+    hdr = _bd_rows[1] if len(_bd_rows) >= 2 else []
+    col = {h: i for i, h in enumerate(hdr)}
+    src = get_source_sheet()
+    written = 0
+    for row in _bd_rows[2:]:
+        if not row or col.get("Date", 1) >= len(row):
+            continue
+        if row[col["Date"]].strip() != date_str:
+            continue
+        if str(row[col.get("Booked", 7)]).upper() != "TRUE":
+            continue
+        user = str(row[col.get("User", 0)]).strip()
+        if user in USER_COLUMNS:
+            src.update(f"{USER_COLUMNS[user]}{plan_row_1based}", [[plan_text]])
+            written += 1
+    _invalidate_bd()
+    return written
+
+def tr_write_volume_for_date(date_str: str, vol_text: str) -> int:
+    """Записывает объём всем забронировавшим на указанную дату. Возвращает кол-во записей."""
+    rows = find_date_rows(date_str)
+    if not rows:
+        return 0
+    vol_row_1based = rows["vol"]
+    _ensure_bd()
+    hdr = _bd_rows[1] if len(_bd_rows) >= 2 else []
+    col = {h: i for i, h in enumerate(hdr)}
+    src = get_source_sheet()
+    written = 0
+    for row in _bd_rows[2:]:
+        if not row or col.get("Date", 1) >= len(row):
+            continue
+        if row[col["Date"]].strip() != date_str:
+            continue
+        if str(row[col.get("Booked", 7)]).upper() != "TRUE":
+            continue
+        user = str(row[col.get("User", 0)]).strip()
+        if user in USER_COLUMNS:
+            src.update(f"{USER_COLUMNS[user]}{vol_row_1based}", [[vol_text]])
+            written += 1
+    _invalidate_bd()
+    return written
+
 # ═══════════════════════════════════════════════════════════════
 # БРОНИРОВАНИЕ В ЛИСТЕ 2026
 # ═══════════════════════════════════════════════════════════════
@@ -1036,9 +1122,10 @@ def kb_trainer_menu():
     b = InlineKeyboardBuilder()
     b.button(text="📅 Расписание",   callback_data="tr_schedule")
     b.button(text="👥 Ученики",      callback_data="tr_students")
-    b.button(text="📢 Рассылка",     callback_data="tr_broadcast")
+    b.button(text="🏋️ Тренировки",  callback_data="tr_trainings")
     b.button(text="📊 Статистика",   callback_data="tr_stats")
-    b.adjust(2, 2)
+    b.button(text="📢 Рассылка",     callback_data="tr_broadcast")
+    b.adjust(2, 2, 1)
     return b.as_markup()
 
 def kb_persistent_trainer():
@@ -1723,7 +1810,10 @@ async def cb_tr_confirm_time(callback: CallbackQuery):
     ok = tr_set_time(date_str, time_str)
     try: await callback.answer("✅ Сохранено" if ok else "❌ Ошибка записи")
     except: pass
-    await cb_tr_schedule(callback)
+    if state.get("from_trainings"):
+        await cb_tr_trainings(callback)
+    else:
+        await cb_tr_schedule(callback)
 
 # ── Ученики ─────────────────────────────────────────────────────
 @dp.callback_query(F.data == "tr_students")
@@ -1974,6 +2064,298 @@ async def cb_tr_stats(callback: CallbackQuery):
     try: await callback.answer()
     except: pass
 
+# ── Тренировки — обзор недели ────────────────────────────────────
+@dp.callback_query(F.data == "tr_trainings")
+async def cb_tr_trainings(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    _ensure_bd()
+
+    if not _bd_rows or not _bd_rows[0]:
+        b = InlineKeyboardBuilder()
+        b.button(text="📂 Открыть следующую неделю", callback_data="tr_tnext")
+        b.button(text="◀️ Назад", callback_data="tr_menu")
+        b.adjust(1)
+        await callback.message.edit_caption(
+            caption="🏋️ *Тренировки*\n\n⏳ Расписание ещё не готово.",
+            reply_markup=b.as_markup(), parse_mode="Markdown")
+        try: await callback.answer()
+        except: pass
+        return
+
+    week_data = tr_get_training_week_data()
+    raw = str(_bd_rows[0][0])
+    parts = [p.strip() for p in raw.split("|")]
+    week_text = f"{parts[0]} | {parts[1]}" if len(parts) >= 2 else parts[0]
+
+    total_booked = sum(len(d["participants"]) for d in week_data.values())
+    missing = []
+    for date_str, d in week_data.items():
+        for p in d["participants"]:
+            if not p["plan"]:
+                missing.append(f"{p['name']} ({d['day_short'].lower()})")
+
+    caption = f"🏋️ *Тренировки*\n\n{week_text}\n\n"
+    caption += f"На этой неделе: *{total_booked}* тренировок\n"
+    if missing:
+        miss_str = ", ".join(missing[:6])
+        if len(missing) > 6:
+            miss_str += f" +{len(missing) - 6}"
+        caption += f"⚠️ Нет плана: {miss_str}"
+    elif total_booked > 0:
+        caption += "✅ У всех написан план"
+
+    b = InlineKeyboardBuilder()
+    days_ordered = tr_get_current_week_days()
+    for day_info in days_ordered:
+        date_str = day_info["date"]
+        if not date_str:
+            continue
+        d = week_data.get(date_str)
+        if not d:
+            continue
+        short = d["day_short"]
+        if d["is_no_train"]:
+            label = f"❌ {short} {date_str[:5]}"
+        elif not d["participants"]:
+            time_part = f" {d['time']}" if d["time"] else ""
+            label = f"⬜ {short} {date_str[:5]}{time_part}"
+        else:
+            names = [p["name"] for p in d["participants"]]
+            names_str = " ".join(names[:4])
+            if len(names) > 4:
+                names_str += f" +{len(names) - 4}"
+            has_missing = any(not p["plan"] for p in d["participants"])
+            icon = "⚠️" if has_missing else "✅"
+            time_part = f" {d['time']}" if d["time"] else ""
+            label = f"{icon} {short} {date_str[:5]}{time_part} — {names_str}"
+        b.button(text=label, callback_data=f"tr_tday_{date_str}")
+
+    week_active = _week_marker_row != -1
+    if week_active:
+        b.button(text="📦 Свернуть неделю",    callback_data="tr_tcollapse")
+    if _prev_week_row != -1:
+        b.button(text="📂 Открыть прошлую",    callback_data="tr_tprev")
+    b.button(text="📂 Открыть следующую",      callback_data="tr_tnext")
+    b.button(text="◀️ Назад",                  callback_data="tr_menu")
+    b.adjust(1)
+
+    await callback.message.edit_caption(caption=caption, reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+# ── Тренировки — карточка дня ────────────────────────────────────
+@dp.callback_query(F.data.startswith("tr_tday_"))
+async def cb_tr_tday(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    date_str = callback.data[len("tr_tday_"):]
+    _ensure_bd()
+    week_data = tr_get_training_week_data()
+    d = week_data.get(date_str)
+    if not d:
+        try: await callback.answer("День не найден", show_alert=True)
+        except: pass
+        return
+
+    short = d["day_short"]
+    time_label = d["time"] if d["time"] else ("удалённо" if d["is_remote"] else "")
+    header = f"🏋️ *{short} {date_str[:5]}*" + (f" — {time_label}" if time_label else "")
+    caption = f"{header}\n\n"
+
+    if not d["participants"]:
+        caption += "👥 Никто не записан\n"
+    else:
+        caption += "👥 *Участники:*\n"
+        for p in d["participants"]:
+            plan_icon = "✅" if p["plan"] else "⚠️"
+            remote_tag = " 🏠" if p["remote"] else ""
+            caption += f"• {p['name']}{remote_tag} {plan_icon}\n"
+        plans = [p["plan"] for p in d["participants"] if p["plan"]]
+        if plans:
+            caption += f"\n📋 *План:*\n{plans[0]}\n"
+        else:
+            caption += "\n📋 *План:* не написан\n"
+        vols = [p["volume"] for p in d["participants"] if p["volume"]]
+        if vols:
+            caption += f"\n📏 *Объём:* {vols[0]}\n"
+
+    b = InlineKeyboardBuilder()
+    if d["participants"]:
+        has_plan = any(p["plan"] for p in d["participants"])
+        b.button(
+            text="✏️ Редактировать план" if has_plan else "✏️ Написать план",
+            callback_data=f"tr_wplan_{date_str}",
+        )
+        b.button(text="📏 Задать объём", callback_data=f"tr_wvol_{date_str}")
+    if not d["is_no_train"] and d["time"]:
+        b.button(text="❌ Нет тренировки", callback_data=f"tr_tnoday_{date_str}")
+    b.button(text="◀️ Назад к тренировкам", callback_data="tr_trainings")
+    b.adjust(1)
+
+    await callback.message.edit_caption(caption=caption, reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+# ── Тренировки — написать/редактировать план ─────────────────────
+@dp.callback_query(F.data.startswith("tr_wplan_"))
+async def cb_tr_wplan(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    date_str = callback.data[len("tr_wplan_"):]
+    uid = callback.from_user.id
+    _ensure_bd()
+    week_data = tr_get_training_week_data()
+    d = week_data.get(date_str, {})
+    day_label = f"{d.get('day_short', '')} {date_str[:5]}"
+    plans = [p["plan"] for p in d.get("participants", []) if p["plan"]]
+    current = plans[0] if plans else ""
+
+    _trainer_state[uid] = {
+        "action":     "write_plan",
+        "date":       date_str,
+        "chat_id":    callback.message.chat.id,
+        "message_id": callback.message.message_id,
+    }
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ Назад", callback_data=f"tr_tday_{date_str}")
+    if current:
+        caption = (f"✏️ *Редактировать план — {day_label}*\n\n"
+                   f"Текущий:\n_{current}_\n\nВведите новый текст:")
+    else:
+        caption = (f"✏️ *Написать план — {day_label}*\n\n"
+                   f"Введите текст плана (будет записан всем участникам):")
+    await callback.message.edit_caption(caption=caption, reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+# ── Тренировки — задать объём ────────────────────────────────────
+@dp.callback_query(F.data.startswith("tr_wvol_"))
+async def cb_tr_wvol(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    date_str = callback.data[len("tr_wvol_"):]
+    uid = callback.from_user.id
+    _ensure_bd()
+    week_data = tr_get_training_week_data()
+    d = week_data.get(date_str, {})
+    day_label = f"{d.get('day_short', '')} {date_str[:5]}"
+    vols = [p["volume"] for p in d.get("participants", []) if p["volume"]]
+    current = vols[0] if vols else ""
+
+    _trainer_state[uid] = {
+        "action":     "write_volume",
+        "date":       date_str,
+        "chat_id":    callback.message.chat.id,
+        "message_id": callback.message.message_id,
+    }
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ Назад", callback_data=f"tr_tday_{date_str}")
+    if current:
+        caption = (f"📏 *Редактировать объём — {day_label}*\n\n"
+                   f"Текущий: _{current}_\n\nВведите новый объём:")
+    else:
+        caption = (f"📏 *Задать объём — {day_label}*\n\n"
+                   f"Введите объём (пример: `3000 м`):")
+    await callback.message.edit_caption(caption=caption, reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+# ── Тренировки — подтвердить план ───────────────────────────────
+@dp.callback_query(F.data == "tr_cplan")
+async def cb_tr_cplan(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    uid = callback.from_user.id
+    state = _trainer_state.pop(uid, {})
+    date_str  = state.get("date", "")
+    plan_text = state.get("text", "")
+    if not date_str or not plan_text:
+        try: await callback.answer("❌ Нет данных")
+        except: pass
+        return
+    count = tr_write_plan_for_date(date_str, plan_text)
+    try: await callback.answer(f"✅ Сохранено для {count} уч." if count else "❌ Ошибка записи")
+    except: pass
+    callback.data = f"tr_tday_{date_str}"
+    await cb_tr_tday(callback)
+
+# ── Тренировки — подтвердить объём ──────────────────────────────
+@dp.callback_query(F.data == "tr_cvol")
+async def cb_tr_cvol(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    uid = callback.from_user.id
+    state = _trainer_state.pop(uid, {})
+    date_str = state.get("date", "")
+    vol_text  = state.get("text", "")
+    if not date_str or not vol_text:
+        try: await callback.answer("❌ Нет данных")
+        except: pass
+        return
+    count = tr_write_volume_for_date(date_str, vol_text)
+    try: await callback.answer(f"✅ Сохранено для {count} уч." if count else "❌ Ошибка записи")
+    except: pass
+    callback.data = f"tr_tday_{date_str}"
+    await cb_tr_tday(callback)
+
+# ── Тренировки — отменить тренировку в день ─────────────────────
+@dp.callback_query(F.data.startswith("tr_tnoday_"))
+async def cb_tr_tnoday(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    date_str = callback.data[len("tr_tnoday_"):]
+    uid = callback.from_user.id
+    _ensure_bd()
+    week_data = tr_get_training_week_data()
+    d = week_data.get(date_str, {})
+    day_label = f"{d.get('day_short', '')} {date_str[:5]}"
+
+    _trainer_state[uid] = {
+        "action": "confirm_time",
+        "date": date_str,
+        "time": "нет тренировки",
+        "from_trainings": True,
+    }
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Подтвердить", callback_data="tr_confirm_time")
+    b.button(text="❌ Отменить",    callback_data=f"tr_tday_{date_str}")
+    b.adjust(2)
+    await callback.message.edit_caption(
+        caption=f"❌ Отменить тренировку *{day_label}*?",
+        reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+# ── Тренировки — навигация по неделям ───────────────────────────
+@dp.callback_query(F.data == "tr_tcollapse")
+async def cb_tr_tcollapse(callback: CallbackQuery):
+    global _week_collapsed
+    if not is_trainer(callback.from_user.id): return
+    if _week_marker_row != -1:
+        toggle_week_collapse(_week_marker_row, True)
+        _week_collapsed = True
+        try: await callback.answer("📦 Свёрнуто")
+        except: pass
+    await cb_tr_trainings(callback)
+
+@dp.callback_query(F.data == "tr_tprev")
+async def cb_tr_tprev(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    if _prev_week_row == -1:
+        try: await callback.answer("❌ Нет прошлой недели", show_alert=True)
+        except: pass
+        return
+    toggle_week_collapse(_prev_week_row, False)
+    try: await callback.answer("📂 Прошлая неделя")
+    except: pass
+    await cb_tr_trainings(callback)
+
+@dp.callback_query(F.data == "tr_tnext")
+async def cb_tr_tnext(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    row = tr_expand_next_week()
+    if row == -1:
+        try: await callback.answer("❌ Следующая неделя не найдена", show_alert=True)
+        except: pass
+    else:
+        try: await callback.answer("📂 Следующая неделя развёрнута")
+        except: pass
+    await cb_tr_trainings(callback)
+
 # ── Текстовые сообщения тренера (пароль, рассылка, время) ───────
 @dp.message(lambda m: m.from_user.id in _trainer_state)
 async def handle_trainer_input(message: Message):
@@ -2036,6 +2418,48 @@ async def handle_trainer_input(message: Message):
                 parse_mode="Markdown")
         except Exception as e:
             print(f"handle_trainer_input custom_time edit error: {e}")
+
+    elif action == "write_plan":
+        date_str  = state.get("date", "")
+        plan_text = (message.text or "").strip()
+        chat_id   = state.get("chat_id")
+        msg_id    = state.get("message_id")
+        if not plan_text:
+            await message.reply("❌ Текст не может быть пустым.")
+            return
+        _trainer_state[uid] = {"action": "confirm_plan", "date": date_str, "text": plan_text}
+        b = InlineKeyboardBuilder()
+        b.button(text="✅ Принять",  callback_data="tr_cplan")
+        b.button(text="❌ Отменить", callback_data=f"tr_tday_{date_str}")
+        b.adjust(2)
+        try:
+            await bot.edit_message_caption(
+                chat_id=chat_id, message_id=msg_id,
+                caption=f"✏️ *Сохранить план?*\n\n_{plan_text}_",
+                reply_markup=b.as_markup(), parse_mode="Markdown")
+        except Exception as e:
+            print(f"handle_trainer_input write_plan error: {e}")
+
+    elif action == "write_volume":
+        date_str = state.get("date", "")
+        vol_text = (message.text or "").strip()
+        chat_id  = state.get("chat_id")
+        msg_id   = state.get("message_id")
+        if not vol_text:
+            await message.reply("❌ Текст не может быть пустым.")
+            return
+        _trainer_state[uid] = {"action": "confirm_volume", "date": date_str, "text": vol_text}
+        b = InlineKeyboardBuilder()
+        b.button(text="✅ Принять",  callback_data="tr_cvol")
+        b.button(text="❌ Отменить", callback_data=f"tr_tday_{date_str}")
+        b.adjust(2)
+        try:
+            await bot.edit_message_caption(
+                chat_id=chat_id, message_id=msg_id,
+                caption=f"📏 *Сохранить объём?*\n\n_{vol_text}_",
+                reply_markup=b.as_markup(), parse_mode="Markdown")
+        except Exception as e:
+            print(f"handle_trainer_input write_volume error: {e}")
 
 # ── Выбор имени ─────────────────────────────────────────────────
 @dp.callback_query(F.data.startswith("user_"))
