@@ -2171,8 +2171,8 @@ async def cb_tr_trainings(callback: CallbackQuery):
         b.button(text="◀️ Назад", callback_data="tr_menu")
         b.adjust(1)
         await callback.message.edit_caption(
-            caption="🏋️ *Тренировки*\n\n⏳ Расписание ещё не готово.",
-            reply_markup=b.as_markup(), parse_mode="Markdown")
+            caption="🏋️ <b>Тренировки</b>\n\n⏳ Расписание ещё не готово.",
+            reply_markup=b.as_markup(), parse_mode="HTML")
         try: await callback.answer()
         except: pass
         return
@@ -2180,12 +2180,12 @@ async def cb_tr_trainings(callback: CallbackQuery):
     viewing_prev = uid in _tr_viewing_prev and _prev_week_row != -1
     if viewing_prev:
         week_data = tr_get_week_data_from_source(_prev_week_row)
-        week_text = "📋 *Прошлая неделя*"
+        week_text = "📋 <b>Прошлая неделя</b>"
     else:
         week_data = tr_get_training_week_data()
         raw = str(_bd_rows[0][0])
         parts = [p.strip() for p in raw.split("|")]
-        week_text = f"{parts[0]} | {parts[1]}" if len(parts) >= 2 else parts[0]
+        week_text = html.escape(f"{parts[0]} | {parts[1]}" if len(parts) >= 2 else parts[0])
 
     total_booked = sum(len(d["participants"]) for d in week_data.values())
     missing = []
@@ -2194,10 +2194,10 @@ async def cb_tr_trainings(callback: CallbackQuery):
             if not p["plan"]:
                 missing.append(f"{p['name']} ({d['day_short'].lower()})")
 
-    caption = f"🏋️ *Тренировки*\n\n{week_text}\n\n"
-    caption += f"На этой неделе: *{total_booked}* тренировок\n"
+    caption = f"🏋️ <b>Тренировки</b>\n\n{week_text}\n\n"
+    caption += f"На этой неделе: <b>{total_booked}</b> тренировок\n"
     if missing:
-        miss_str = ", ".join(missing[:6])
+        miss_str = html.escape(", ".join(missing[:6]))
         if len(missing) > 6:
             miss_str += f" +{len(missing) - 6}"
         caption += f"⚠️ Нет плана: {miss_str}"
@@ -2278,11 +2278,14 @@ async def cb_tr_trainings(callback: CallbackQuery):
         rows_kb.append([InlineKeyboardButton(text="📦 Свернуть текущую неделю", callback_data="tr_tcollapse")])
     rows_kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="tr_menu")])
 
-    await callback.message.edit_caption(
-        caption=caption,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows_kb),
-        parse_mode="Markdown",
-    )
+    try:
+        await callback.message.edit_caption(
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows_kb),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        print(f"cb_tr_trainings edit_caption error: {e}")
     try: await callback.answer()
     except: pass
 
@@ -2569,6 +2572,7 @@ async def cb_tr_cplan(callback: CallbackQuery):
             tr_write_comment_for_date(date_str, comm_text)
         try: await callback.answer(f"✅ Сохранено для {count} уч." if count else "❌ Ошибка записи")
         except: pass
+    _tr_expanded[uid] = date_str
     callback.data = "tr_trainings"
     await cb_tr_trainings(callback)
 
