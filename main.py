@@ -2174,8 +2174,8 @@ async def cb_tr_trainings(callback: CallbackQuery):
             continue
 
         # Заголовок дня — кликабельный аккордеон
-        time_part = "нет тренировки" if d["is_no_train"] else (
-            d["time"] if d["time"] else (" удалённо" if d["is_remote"] else "")
+        time_part = d["time"] if d["time"] and not d["is_no_train"] else (
+            "удалённо" if d["is_remote"] or d["participants"] else ""
         )
         n = len(d["participants"])
         n_str = f" — {n} уч." if n else ""
@@ -2677,10 +2677,12 @@ async def handle_trainer_input(message: Message):
         comm_text = parts[2].strip() if len(parts) > 2 else ""
         _trainer_state[uid] = {
             "action": "confirm_plan",
-            "date": date_str,
-            "text": plan_text,
-            "vol":  vol_text,
-            "comm": comm_text,
+            "date":   date_str,
+            "text":   plan_text,
+            "vol":    vol_text,
+            "comm":   comm_text,
+            "name":   state.get("name", ""),
+            "names":  state.get("names", []),
         }
         preview = f"📋 *План:*\n{plan_text}"
         if vol_text:
