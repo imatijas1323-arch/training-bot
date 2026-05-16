@@ -198,6 +198,7 @@ _trainer_state:          dict[int, dict]       = {}     # {user_id: {action, ...
 _trainer_view_as:        dict[int, str]        = {}     # trainer_id → имя ученика (режим просмотра)
 _tr_expanded:            dict[int, str]        = {}     # trainer_id → развёрнутая дата в разделе Тренировки
 _tr_plan_sel:            dict[int, dict]       = {}     # trainer_id → {date_str: [names]} мультивыбор для плана
+_tr_viewing_prev:        set                   = set()  # trainer_id → просматривает прошлую неделю
 BD_TTL = 300                                 # секунд (5 минут)
 
 STATES = [
@@ -955,6 +956,55 @@ def tr_get_training_week_data() -> dict:
             "is_remote":   day_info["is_remote"],
             "participants": participants,
         }
+    return result
+
+def tr_get_week_data_from_source(week_row: int) -> dict:
+    """Читает данные недели прямо из листа 2026 для произвольной строки (напр. прошлая неделя)."""
+    days = tr_get_current_week_days(override_row=week_row)
+    if not days:
+        return {}
+    data = get_source_sheet().get_all_values()
+    header = data[11] if len(data) > 11 else []
+    user_cols = {}
+    for name, col_letter in USER_COLUMNS.items():
+        idx = ord(col_letter) - ord("A")
+        user_cols[name] = idx
+
+    result = {}
+    row_idx = week_row
+    for day_info in days:
+        date_str = day_info["date"]
+        if row_idx + 3 >= len(data):
+            row_idx += 5
+            continue
+        bron_row = data[row_idx]
+        plan_row = data[row_idx + 1]
+        vol_row  = data[row_idx + 2]
+        com_row  = data[row_idx + 3]
+        participants = []
+        for name, col_idx in user_cols.items():
+            booked = str(bron_row[col_idx]).upper() == "TRUE" if col_idx < len(bron_row) else False
+            if not booked:
+                row_idx_next = row_idx
+                continue
+            plan    = str(plan_row[col_idx]).strip() if col_idx < len(plan_row) else ""
+            volume  = str(vol_row[col_idx]).strip()  if col_idx < len(vol_row)  else ""
+            comment = str(com_row[col_idx]).strip()  if col_idx < len(com_row)  else ""
+            plan    = "" if plan    in ("nan", "None") else plan
+            volume  = "" if volume  in ("nan", "None") else volume
+            comment = "" if comment in ("nan", "None") else comment
+            remote  = day_info["is_remote"] or "удал" in plan.lower() or "удал" in comment.lower()
+            participants.append({
+                "name": name, "plan": plan, "volume": volume, "remote": remote,
+            })
+        result[date_str] = {
+            "day_short":    day_info["day_short"],
+            "time":         day_info["time"],
+            "is_no_train":  day_info["is_no_train"],
+            "is_remote":    day_info["is_remote"],
+            "participants": participants,
+        }
+        row_idx += 5
     return result
 
 def tr_write_plan_for_date(date_str: str, plan_text: str) -> int:
@@ -2125,10 +2175,15 @@ async def cb_tr_trainings(callback: CallbackQuery):
         except: pass
         return
 
-    week_data = tr_get_training_week_data()
-    raw = str(_bd_rows[0][0])
-    parts = [p.strip() for p in raw.split("|")]
-    week_text = f"{parts[0]} | {parts[1]}" if len(parts) >= 2 else parts[0]
+    viewing_prev = uid in _tr_viewing_prev and _prev_week_row != -1
+    if viewing_prev:
+        week_data = tr_get_week_data_from_source(_prev_week_row)
+        week_text = "📋 *Прошлая неделя*"
+    else:
+        week_data = tr_get_training_week_data()
+        raw = str(_bd_rows[0][0])
+        parts = [p.strip() for p in raw.split("|")]
+        week_text = f"{parts[0]} | {parts[1]}" if len(parts) >= 2 else parts[0]
 
     total_booked = sum(len(d["participants"]) for d in week_data.values())
     missing = []
@@ -2153,10 +2208,12 @@ async def cb_tr_trainings(callback: CallbackQuery):
     expanded_date = _tr_expanded.get(uid)
 
     # Навигация — прошлая неделя сверху
-    if _prev_week_row != -1:
+    if viewing_prev:
+        rows_kb.append([InlineKeyboardButton(text="📅 Текущая неделя", callback_data="tr_tcurr")])
+    elif _prev_week_row != -1:
         rows_kb.append([InlineKeyboardButton(text="📂 Прошлая неделя", callback_data="tr_tprev")])
 
-    days_ordered = tr_get_current_week_days()
+    days_ordered = tr_get_current_week_days() if not viewing_prev else tr_get_current_week_days(override_row=_prev_week_row)
     for day_info in days_ordered:
         date_str = day_info["date"]
         if not date_str:
@@ -2584,7 +2641,18 @@ async def cb_tr_tprev(callback: CallbackQuery):
         except: pass
         return
     toggle_week_collapse(_prev_week_row, False)
+    _tr_viewing_prev.add(callback.from_user.id)
+    _tr_expanded.pop(callback.from_user.id, None)
     try: await callback.answer("📂 Прошлая неделя")
+    except: pass
+    await cb_tr_trainings(callback)
+
+@dp.callback_query(F.data == "tr_tcurr")
+async def cb_tr_tcurr(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    _tr_viewing_prev.discard(callback.from_user.id)
+    _tr_expanded.pop(callback.from_user.id, None)
+    try: await callback.answer("📅 Текущая неделя")
     except: pass
     await cb_tr_trainings(callback)
 
