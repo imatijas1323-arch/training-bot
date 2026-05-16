@@ -2275,8 +2275,7 @@ async def cb_tr_trainings(callback: CallbackQuery):
 
     if week_active:
         rows_kb.append([InlineKeyboardButton(text="📦 Свернуть текущую неделю", callback_data="tr_tcollapse")])
-    rows_kb.append([InlineKeyboardButton(text="📂 Открыть следующую неделю", callback_data="tr_tnext")])
-    rows_kb.append([InlineKeyboardButton(text="◀️ Назад",                   callback_data="tr_menu")])
+    rows_kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="tr_menu")])
 
     await callback.message.edit_caption(
         caption=caption,
