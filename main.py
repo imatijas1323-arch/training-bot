@@ -2300,11 +2300,14 @@ async def cb_tr_trainings(callback: CallbackQuery):
         rows_kb.append([InlineKeyboardButton(text="📦 Свернуть текущую неделю", callback_data="tr_tcollapse")])
     rows_kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="tr_menu")])
 
-    await callback.message.edit_caption(
-        caption=caption,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows_kb),
-        parse_mode="HTML",
-    )
+    try:
+        await callback.message.edit_caption(
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows_kb),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        print(f"cb_tr_trainings edit_caption error: {e}")
     try: await callback.answer()
     except: pass
 
@@ -2604,31 +2607,27 @@ async def cb_tr_cplan(callback: CallbackQuery):
     _tr_expanded[uid] = date_str
     nav_chat_id = state.get("chat_id") or (callback.message.chat.id if callback.message else None)
     nav_msg_id  = state.get("message_id") or (callback.message.message_id if callback.message else None)
-    callback.data = "tr_trainings"
-    try:
-        await cb_tr_trainings(callback)
-    except Exception as e:
-        print(f"cb_tr_cplan → cb_tr_trainings error: {e}")
-        b_nav = InlineKeyboardBuilder()
-        b_nav.button(text="🏋️ К тренировкам", callback_data="tr_trainings")
-        fallback_shown = False
-        if nav_chat_id and nav_msg_id:
-            try:
-                await bot.edit_message_caption(
-                    chat_id=nav_chat_id, message_id=nav_msg_id,
-                    caption="✅ <b>Сохранено!</b>",
-                    reply_markup=b_nav.as_markup(), parse_mode="HTML"
-                )
-                fallback_shown = True
-            except Exception as e2:
-                print(f"cb_tr_cplan fallback edit error: {e2}")
-        if not fallback_shown:
-            try:
-                await bot.send_message(
-                    callback.from_user.id, "✅ <b>Сохранено!</b>",
-                    reply_markup=b_nav.as_markup(), parse_mode="HTML"
-                )
-            except: pass
+    b_nav = InlineKeyboardBuilder()
+    b_nav.button(text="🏋️ К тренировкам", callback_data="tr_trainings")
+    nav_shown = False
+    if nav_chat_id and nav_msg_id:
+        try:
+            await bot.edit_message_caption(
+                chat_id=nav_chat_id, message_id=nav_msg_id,
+                caption="✅ <b>Сохранено!</b>",
+                reply_markup=b_nav.as_markup(), parse_mode="HTML"
+            )
+            nav_shown = True
+        except Exception as e:
+            print(f"cb_tr_cplan nav edit error: {e}")
+    if not nav_shown:
+        try:
+            await bot.send_message(
+                callback.from_user.id, "✅ <b>Сохранено!</b>",
+                reply_markup=b_nav.as_markup(), parse_mode="HTML"
+            )
+        except Exception as e:
+            print(f"cb_tr_cplan send_message error: {e}")
 
 # ── Тренировки — подтвердить объём ──────────────────────────────
 @dp.callback_query(F.data == "tr_cvol")
