@@ -2461,6 +2461,9 @@ async def handle_trainer_input(message: Message):
         except Exception as e:
             print(f"handle_trainer_input write_volume error: {e}")
 
+    elif action in ("confirm_plan", "confirm_volume"):
+        await message.reply("Нажмите ✅ *Принять* или ❌ *Отменить* в сообщении выше.", parse_mode="Markdown")
+
 # ── Выбор имени ─────────────────────────────────────────────────
 @dp.callback_query(F.data.startswith("user_"))
 async def cb_select_user(callback: CallbackQuery):
