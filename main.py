@@ -2307,7 +2307,10 @@ async def cb_tr_trainings(callback: CallbackQuery):
                 )])
 
     if week_active:
-        rows_kb.append([InlineKeyboardButton(text="📦 Свернуть текущую неделю", callback_data="tr_tcollapse")])
+        if _week_collapsed:
+            rows_kb.append([InlineKeyboardButton(text="📂 Развернуть текущую неделю", callback_data="tr_texpand_curr")])
+        else:
+            rows_kb.append([InlineKeyboardButton(text="📦 Свернуть текущую неделю", callback_data="tr_tcollapse")])
     rows_kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="tr_menu")])
 
     try:
@@ -2693,6 +2696,17 @@ async def cb_tr_tcollapse(callback: CallbackQuery):
         toggle_week_collapse(_week_marker_row, True)
         _week_collapsed = True
         try: await callback.answer("📦 Свёрнуто")
+        except: pass
+    await cb_tr_trainings(callback)
+
+@dp.callback_query(F.data == "tr_texpand_curr")
+async def cb_tr_texpand_curr(callback: CallbackQuery):
+    global _week_collapsed
+    if not is_trainer(callback.from_user.id): return
+    if _week_marker_row != -1:
+        toggle_week_collapse(_week_marker_row, False)
+        _week_collapsed = False
+        try: await callback.answer("📂 Развёрнуто")
         except: pass
     await cb_tr_trainings(callback)
 
