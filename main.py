@@ -197,6 +197,7 @@ _authenticated_trainers: set[int]              = set()  # trainer IDs проше
 _trainer_state:          dict[int, dict]       = {}     # {user_id: {action, ...}} для многошаговых потоков
 _trainer_view_as:        dict[int, str]        = {}     # trainer_id → имя ученика (режим просмотра)
 _tr_expanded:            dict[int, str]        = {}     # trainer_id → развёрнутая дата в разделе Тренировки
+_tr_plan_sel:            dict[int, dict]       = {}     # trainer_id → {date_str: [names]} мультивыбор для плана
 BD_TTL = 300                                 # секунд (5 минут)
 
 STATES = [
@@ -980,6 +981,20 @@ def tr_write_plan_for_date(date_str: str, plan_text: str) -> int:
             written += 1
     _invalidate_bd()
     return written
+
+def tr_write_plan_for_user(date_str: str, user_name: str, plan_text: str) -> bool:
+    """Записывает план конкретному участнику."""
+    rows = find_date_rows(date_str)
+    if not rows or user_name not in USER_COLUMNS:
+        return False
+    plan_row_1based = rows["bron"] + 1
+    try:
+        get_source_sheet().update(f"{USER_COLUMNS[user_name]}{plan_row_1based}", [[plan_text]])
+        _invalidate_bd()
+        return True
+    except Exception as e:
+        print(f"tr_write_plan_for_user({user_name}, {date_str}) ошибка: {e}")
+        return False
 
 def tr_write_volume_for_date(date_str: str, vol_text: str) -> int:
     """Записывает объём всем забронировавшим на указанную дату. Возвращает кол-во записей."""
@@ -2171,20 +2186,33 @@ async def cb_tr_trainings(callback: CallbackQuery):
         )])
 
         if is_expanded and d["participants"]:
-            # Кнопки участников (до 3 в ряд); ✅ если план есть
+            # Кнопки участников (до 3 в ряд)
+            # С планом → карточка; без плана → чекбокс для мультивыбора
+            sel_for_day = _tr_plan_sel.get(uid, {}).get(date_str, [])
             part_row = []
             for p in d["participants"]:
-                plan_mark = "✅ " if p["plan"] else ""
                 remote_mark = " 🏠" if p["remote"] else ""
-                part_row.append(InlineKeyboardButton(
-                    text=f"{plan_mark}{p['name']}{remote_mark}",
-                    callback_data=f"tr_tpart_{date_str}_{p['name']}",
-                ))
+                if p["plan"]:
+                    part_row.append(InlineKeyboardButton(
+                        text=f"✅ {p['name']}{remote_mark}",
+                        callback_data=f"tr_tpart_{date_str}_{p['name']}",
+                    ))
+                else:
+                    mark = "☑️" if p["name"] in sel_for_day else "◻️"
+                    part_row.append(InlineKeyboardButton(
+                        text=f"{mark} {p['name']}{remote_mark}",
+                        callback_data=f"tr_ptog_{date_str}_{p['name']}",
+                    ))
                 if len(part_row) == 3:
                     rows_kb.append(part_row)
                     part_row = []
             if part_row:
                 rows_kb.append(part_row)
+            if sel_for_day:
+                rows_kb.append([InlineKeyboardButton(
+                    text=f"✏️ Написать план ({len(sel_for_day)} уч.)",
+                    callback_data=f"tr_pwrite_{date_str}",
+                )])
 
     if week_active:
         rows_kb.append([InlineKeyboardButton(text="📦 Свернуть текущую неделю", callback_data="tr_tcollapse")])
@@ -2207,9 +2235,57 @@ async def cb_tr_texpand(callback: CallbackQuery):
     date_str = callback.data[len("tr_texpand_"):]
     if _tr_expanded.get(uid) == date_str:
         _tr_expanded.pop(uid, None)
+        _tr_plan_sel.get(uid, {}).pop(date_str, None)  # сброс выбора при сворачивании
     else:
         _tr_expanded[uid] = date_str
     await cb_tr_trainings(callback)
+
+# ── Тренировки — переключить участника в мультивыборе плана ──────
+@dp.callback_query(F.data.startswith("tr_ptog_"))
+async def cb_tr_ptog(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    uid      = callback.from_user.id
+    rest     = callback.data[len("tr_ptog_"):]
+    date_str = rest[:10]
+    name     = rest[11:]
+    day_sel  = _tr_plan_sel.setdefault(uid, {}).setdefault(date_str, [])
+    if name in day_sel:
+        day_sel.remove(name)
+    else:
+        day_sel.append(name)
+    await cb_tr_trainings(callback)
+
+# ── Тренировки — написать план для выбранных участников ──────────
+@dp.callback_query(F.data.startswith("tr_pwrite_"))
+async def cb_tr_pwrite(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    uid      = callback.from_user.id
+    date_str = callback.data[len("tr_pwrite_"):]
+    selected = _tr_plan_sel.get(uid, {}).get(date_str, [])
+    if not selected:
+        try: await callback.answer("❌ Никто не выбран", show_alert=True)
+        except: pass
+        return
+    _ensure_bd()
+    week_data = tr_get_training_week_data()
+    d         = week_data.get(date_str, {})
+    day_label = f"{d.get('day_short', '')} {date_str[:5]}"
+    names_str = ", ".join(selected)
+    _trainer_state[uid] = {
+        "action":     "write_plan",
+        "date":       date_str,
+        "names":      list(selected),
+        "chat_id":    callback.message.chat.id,
+        "message_id": callback.message.message_id,
+    }
+    hint = "После `---` на отдельной строке — объём (запишется автоматически)."
+    caption = (f"✏️ *Написать план — {day_label}*\n\n"
+               f"Для: _{names_str}_\n\n{hint}\n\nВведите текст плана:")
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ Назад", callback_data="tr_trainings")
+    await callback.message.edit_caption(caption=caption, reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
 
 # ── Тренировки — карточка дня ────────────────────────────────────
 @dp.callback_query(F.data.startswith("tr_tday_"))
@@ -2296,9 +2372,44 @@ async def cb_tr_tpart(callback: CallbackQuery):
 
     b = InlineKeyboardBuilder()
     plan_btn = "✏️ Редактировать план" if p["plan"] else "📋 Написать план"
-    b.button(text=plan_btn, callback_data=f"tr_wplan_{date_str}")
+    b.button(text=plan_btn, callback_data=f"tr_wplan_u_{date_str}_{name}")
     b.button(text="◀️ Назад к тренировкам", callback_data="tr_trainings")
     b.adjust(1)
+    await callback.message.edit_caption(caption=caption, reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+# ── Тренировки — написать план конкретному участнику ─────────────
+@dp.callback_query(F.data.startswith("tr_wplan_u_"))
+async def cb_tr_wplan_user(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    rest     = callback.data[len("tr_wplan_u_"):]
+    date_str = rest[:10]
+    name     = rest[11:]
+    uid = callback.from_user.id
+    _ensure_bd()
+    week_data = tr_get_training_week_data()
+    d = week_data.get(date_str, {})
+    day_label = f"{d.get('day_short', '')} {date_str[:5]}"
+    p = next((x for x in d.get("participants", []) if x["name"] == name), None)
+    current = p["plan"] if p else ""
+
+    _trainer_state[uid] = {
+        "action":     "write_plan",
+        "date":       date_str,
+        "name":       name,
+        "chat_id":    callback.message.chat.id,
+        "message_id": callback.message.message_id,
+    }
+    b = InlineKeyboardBuilder()
+    hint = "После `---` на отдельной строке — объём (запишется автоматически)."
+    if current:
+        caption = (f"✏️ *Редактировать план — {name}, {day_label}*\n\n"
+                   f"Текущий:\n_{current}_\n\n{hint}\n\nВведите новый текст:")
+    else:
+        caption = (f"✏️ *Написать план — {name}, {day_label}*\n\n"
+                   f"{hint}\n\nВведите текст плана:")
+    b.button(text="◀️ Назад", callback_data=f"tr_tpart_{date_str}_{name}")
     await callback.message.edit_caption(caption=caption, reply_markup=b.as_markup(), parse_mode="Markdown")
     try: await callback.answer()
     except: pass
@@ -2378,17 +2489,33 @@ async def cb_tr_cplan(callback: CallbackQuery):
         try: await callback.answer("❌ Нет данных")
         except: pass
         return
-    count = tr_write_plan_for_date(date_str, plan_text)
-    vol_text  = state.get("vol", "")
-    comm_text = state.get("comm", "")
-    if vol_text:
-        tr_write_volume_for_date(date_str, vol_text)
-    if comm_text:
-        tr_write_comment_for_date(date_str, comm_text)
-    try: await callback.answer(f"✅ Сохранено для {count} уч." if count else "❌ Ошибка записи")
-    except: pass
-    callback.data = "tr_trainings"
-    await cb_tr_trainings(callback)
+    name  = state.get("name", "")
+    names = state.get("names", [])
+    if name:
+        ok = tr_write_plan_for_user(date_str, name, plan_text)
+        try: await callback.answer("✅ План сохранён" if ok else "❌ Ошибка записи")
+        except: pass
+        callback.data = f"tr_tpart_{date_str}_{name}"
+        await cb_tr_tpart(callback)
+    elif names:
+        written = sum(1 for n in names if tr_write_plan_for_user(date_str, n, plan_text))
+        _tr_plan_sel.get(uid, {}).pop(date_str, None)  # сброс выбора после записи
+        try: await callback.answer(f"✅ План записан для {written} уч.")
+        except: pass
+        callback.data = "tr_trainings"
+        await cb_tr_trainings(callback)
+    else:
+        count = tr_write_plan_for_date(date_str, plan_text)
+        vol_text  = state.get("vol", "")
+        comm_text = state.get("comm", "")
+        if vol_text:
+            tr_write_volume_for_date(date_str, vol_text)
+        if comm_text:
+            tr_write_comment_for_date(date_str, comm_text)
+        try: await callback.answer(f"✅ Сохранено для {count} уч." if count else "❌ Ошибка записи")
+        except: pass
+        callback.data = "tr_trainings"
+        await cb_tr_trainings(callback)
 
 # ── Тренировки — подтвердить объём ──────────────────────────────
 @dp.callback_query(F.data == "tr_cvol")
