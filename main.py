@@ -501,8 +501,12 @@ def sync_bd():
     и перезаписывает лист BD. Вызывается перед каждым показом расписания/записей.
     """
     global _bd_rows, _bd_ts
-    src  = get_source_sheet()
-    data = src.get_all_values()
+    try:
+        src  = get_source_sheet()
+        data = src.get_all_values()
+    except Exception as e:
+        print(f"sync_bd() ошибка чтения: {e}")
+        return
 
     # Находим строку с маркером текущей недели
     week_bron_idx = None
@@ -599,9 +603,13 @@ def sync_bd():
     # Пишем в BD одним запросом + обновляем in-memory кэш без повторного чтения
     header_row = ["User", "Date", "Day", "Time", "Plan", "Volume", "Remote", "Booked", "Comments"]
     all_rows = [[week_line], header_row] + records
-    bd = get_bd_sheet()
-    bd.clear()
-    bd.update(all_rows, "A1")
+    try:
+        bd = get_bd_sheet()
+        bd.clear()
+        bd.update(all_rows, "A1")
+    except Exception as e:
+        print(f"sync_bd() ошибка записи в BD: {e}")
+        return
     _bd_rows = all_rows
     _bd_ts   = time.time()
 
@@ -796,24 +804,6 @@ def tr_close_current_week() -> bool:
     _week_collapsed  = False
     _invalidate_bd()
     return True
-
-def tr_open_next_week() -> str:
-    global _week_marker_row
-    row = tr_find_next_week_row()
-    if row == -1:
-        return "Следующая неделя не найдена"
-    src  = get_source_sheet()
-    data = src.get_all_values()
-    if _week_marker_row != -1:
-        cur_last = len(data[_week_marker_row])
-        src.update(gspread.utils.rowcol_to_a1(_week_marker_row + 1, cur_last), [["прошедшая неделя"]])
-        toggle_week_collapse(_week_marker_row, True)
-    toggle_week_collapse(row, False)
-    nxt_last = len(data[row])
-    src.update(gspread.utils.rowcol_to_a1(row + 1, nxt_last), [["текущая неделя"]])
-    _week_marker_row = row  # сразу обновляем — не ждём week_watcher
-    _invalidate_bd()
-    return "ok"
 
 def tr_expand_next_week() -> int:
     """Разворачивает следующую неделю в таблице без установки маркера. Возвращает строку или -1."""
@@ -1136,7 +1126,11 @@ def tr_write_comment_for_date(date_str: str, comment_text: str) -> int:
     return written
 
 def find_date_rows(date_str: str) -> dict | None:
-    data = get_source_sheet().get_all_values()
+    try:
+        data = get_source_sheet().get_all_values()
+    except Exception as e:
+        print(f"find_date_rows({date_str}) ошибка: {e}")
+        return None
     for i, row in enumerate(data):
         b = str(row[1]).strip() if len(row) > 1 else ""
         if b == date_str:
