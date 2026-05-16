@@ -2163,9 +2163,10 @@ async def cb_tr_trainings(callback: CallbackQuery):
         _invalidate_bd()
     _ensure_bd()
 
+    uid = callback.from_user.id
+
     if not _bd_rows or not _bd_rows[0]:
         b = InlineKeyboardBuilder()
-        b.button(text="📂 Открыть следующую неделю", callback_data="tr_tnext")
         b.button(text="◀️ Назад", callback_data="tr_menu")
         b.adjust(1)
         await callback.message.edit_caption(
@@ -2204,7 +2205,6 @@ async def cb_tr_trainings(callback: CallbackQuery):
 
     rows_kb = []
     week_active = _week_marker_row != -1
-    uid = callback.from_user.id
     expanded_date = _tr_expanded.get(uid)
 
     # Навигация — прошлая неделя сверху
