@@ -1047,6 +1047,28 @@ def tr_write_plan_for_user(date_str: str, user_name: str, plan_text: str) -> boo
         print(f"tr_write_plan_for_user({user_name}, {date_str}) ошибка: {e}")
         return False
 
+def tr_write_vol_for_user(date_str: str, user_name: str, vol_text: str) -> bool:
+    rows = find_date_rows(date_str)
+    if not rows or user_name not in USER_COLUMNS:
+        return False
+    try:
+        get_source_sheet().update(f"{USER_COLUMNS[user_name]}{rows['vol']}", [[vol_text]])
+        return True
+    except Exception as e:
+        print(f"tr_write_vol_for_user({user_name}, {date_str}) ошибка: {e}")
+        return False
+
+def tr_write_comm_for_user(date_str: str, user_name: str, comm_text: str) -> bool:
+    rows = find_date_rows(date_str)
+    if not rows or user_name not in USER_COLUMNS:
+        return False
+    try:
+        get_source_sheet().update(f"{USER_COLUMNS[user_name]}{rows['vol'] + 1}", [[comm_text]])
+        return True
+    except Exception as e:
+        print(f"tr_write_comm_for_user({user_name}, {date_str}) ошибка: {e}")
+        return False
+
 def tr_write_volume_for_date(date_str: str, vol_text: str) -> int:
     """Записывает объём всем забронировавшим на указанную дату. Возвращает кол-во записей."""
     rows = find_date_rows(date_str)
@@ -2551,21 +2573,31 @@ async def cb_tr_cplan(callback: CallbackQuery):
         try: await callback.answer("❌ Нет данных")
         except: pass
         return
-    name  = state.get("name", "")
-    names = state.get("names", [])
+    name      = state.get("name", "")
+    names     = state.get("names", [])
+    vol_text  = state.get("vol", "")
+    comm_text = state.get("comm", "")
     if name:
         ok = tr_write_plan_for_user(date_str, name, plan_text)
+        if vol_text:
+            tr_write_vol_for_user(date_str, name, vol_text)
+        if comm_text:
+            tr_write_comm_for_user(date_str, name, comm_text)
         try: await callback.answer("✅ План сохранён" if ok else "❌ Ошибка записи")
         except: pass
     elif names:
         written = sum(1 for n in names if tr_write_plan_for_user(date_str, n, plan_text))
+        if vol_text:
+            for n in names:
+                tr_write_vol_for_user(date_str, n, vol_text)
+        if comm_text:
+            for n in names:
+                tr_write_comm_for_user(date_str, n, comm_text)
         _tr_plan_sel.get(uid, {}).pop(date_str, None)
         try: await callback.answer(f"✅ План записан для {written} уч.")
         except: pass
     else:
         count = tr_write_plan_for_date(date_str, plan_text)
-        vol_text  = state.get("vol", "")
-        comm_text = state.get("comm", "")
         if vol_text:
             tr_write_volume_for_date(date_str, vol_text)
         if comm_text:
@@ -2574,7 +2606,18 @@ async def cb_tr_cplan(callback: CallbackQuery):
         except: pass
     _tr_expanded[uid] = date_str
     callback.data = "tr_trainings"
-    await cb_tr_trainings(callback)
+    try:
+        await cb_tr_trainings(callback)
+    except Exception as e:
+        print(f"cb_tr_cplan → cb_tr_trainings error: {e}")
+        b = InlineKeyboardBuilder()
+        b.button(text="🏋️ Тренировки", callback_data="tr_trainings")
+        try:
+            await callback.message.edit_caption(
+                caption="✅ <b>Сохранено!</b>",
+                reply_markup=b.as_markup(), parse_mode="HTML"
+            )
+        except: pass
 
 # ── Тренировки — подтвердить объём ──────────────────────────────
 @dp.callback_query(F.data == "tr_cvol")
