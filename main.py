@@ -2605,19 +2605,26 @@ async def cb_tr_cplan(callback: CallbackQuery):
         try: await callback.answer(f"✅ Сохранено для {count} уч." if count else "❌ Ошибка записи")
         except: pass
     _tr_expanded[uid] = date_str
-    callback.data = "tr_trainings"
-    try:
-        await cb_tr_trainings(callback)
-    except Exception as e:
-        print(f"cb_tr_cplan → cb_tr_trainings error: {e}")
-        b = InlineKeyboardBuilder()
-        b.button(text="🏋️ Тренировки", callback_data="tr_trainings")
+    nav_chat_id = state.get("chat_id") or (callback.message.chat.id if callback.message else None)
+    nav_msg_id  = state.get("message_id") or (callback.message.message_id if callback.message else None)
+    b_nav = InlineKeyboardBuilder()
+    b_nav.button(text="🏋️ К тренировкам", callback_data="tr_trainings")
+    if nav_chat_id and nav_msg_id:
         try:
-            await callback.message.edit_caption(
+            await bot.edit_message_caption(
+                chat_id=nav_chat_id, message_id=nav_msg_id,
                 caption="✅ <b>Сохранено!</b>",
-                reply_markup=b.as_markup(), parse_mode="HTML"
+                reply_markup=b_nav.as_markup(), parse_mode="HTML"
             )
-        except: pass
+        except Exception as e:
+            print(f"cb_tr_cplan nav edit error: {e}")
+            try:
+                await bot.send_message(
+                    callback.from_user.id,
+                    "✅ <b>Сохранено!</b>",
+                    reply_markup=b_nav.as_markup(), parse_mode="HTML"
+                )
+            except: pass
 
 # ── Тренировки — подтвердить объём ──────────────────────────────
 @dp.callback_query(F.data == "tr_cvol")
@@ -2787,13 +2794,15 @@ async def handle_trainer_input(message: Message):
         vol_text  = parts[1].strip() if len(parts) > 1 else ""
         comm_text = parts[2].strip() if len(parts) > 2 else ""
         _trainer_state[uid] = {
-            "action": "confirm_plan",
-            "date":   date_str,
-            "text":   plan_text,
-            "vol":    vol_text,
-            "comm":   comm_text,
-            "name":   state.get("name", ""),
-            "names":  state.get("names", []),
+            "action":     "confirm_plan",
+            "date":       date_str,
+            "text":       plan_text,
+            "vol":        vol_text,
+            "comm":       comm_text,
+            "name":       state.get("name", ""),
+            "names":      state.get("names", []),
+            "chat_id":    chat_id,
+            "message_id": msg_id,
         }
         preview = f"📋 <b>План:</b>\n{html.escape(plan_text)}"
         if vol_text:
