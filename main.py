@@ -500,6 +500,7 @@ def sync_bd():
     Читает лист 2026, находит текущую неделю, формирует плоскую таблицу
     и перезаписывает лист BD. Вызывается перед каждым показом расписания/записей.
     """
+    global _bd_rows, _bd_ts
     src  = get_source_sheet()
     data = src.get_all_values()
 
@@ -511,7 +512,9 @@ def sync_bd():
             week_bron_idx = i
             break
     if week_bron_idx is None:
-        get_bd_sheet().clear()  # сбрасываем BD чтобы кэш не показывал старые данные
+        get_bd_sheet().clear()
+        _bd_rows = []
+        _bd_ts   = time.time()
         return
 
     # Заголовок недели (строка выше блока Забронировать)
@@ -594,7 +597,6 @@ def sync_bd():
     week_line  = f"{week_label}  |  {week_dates}"
 
     # Пишем в BD одним запросом + обновляем in-memory кэш без повторного чтения
-    global _bd_rows, _bd_ts
     header_row = ["User", "Date", "Day", "Time", "Plan", "Volume", "Remote", "Booked", "Comments"]
     all_rows = [[week_line], header_row] + records
     bd = get_bd_sheet()
