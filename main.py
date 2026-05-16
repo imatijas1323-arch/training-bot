@@ -178,6 +178,8 @@ _user_cache:          dict[int, str] = {}   # telegram_id → имя
 _tid_cache:           dict[str, int] = {}   # имя → telegram_id
 _bd_rows:             list           = []   # строки из листа BD
 _bd_ts:               float          = 0.0  # время последней синхронизации
+_week_days_cache:     list           = []   # кэш tr_get_current_week_days()
+_week_days_ts:        float          = 0.0  # TTL кэша дней недели
 _week_marker_row:       int  = -1    # строка с "текущая неделя"
 _prev_week_row:         int  = -1    # строка последней закрытой недели
 _pending_open_row:      int  = -1    # развёрнутая но ещё не открытая неделя
@@ -258,8 +260,9 @@ def _is_finished(date_str: str, time_str: str = "") -> bool:
         return False
 
 def _invalidate_bd():
-    global _bd_ts
+    global _bd_ts, _week_days_ts
     _bd_ts = 0.0
+    _week_days_ts = 0.0
 
 def load_all_tids():
     """Загружает telegram_id всех пользователей из строки 6 таблицы в кэш."""
@@ -283,11 +286,9 @@ def load_all_tids():
         print(f"load_all_tids ошибка: {e}")
 
 def _ensure_bd():
-    global _bd_rows, _bd_ts
+    global _bd_ts
     if (time.time() - _bd_ts) > BD_TTL:
-        sync_bd()
-        _bd_rows = get_bd_sheet().get_all_values()
-        _bd_ts   = time.time()
+        sync_bd()  # sync_bd сам обновляет _bd_rows и _bd_ts
 
 # ═══════════════════════════════════════════════════════════════
 # ПОЛЬЗОВАТЕЛИ
@@ -592,13 +593,15 @@ def sync_bd():
     week_dates = f"{dates[0]} — {dates[-1]}" if len(dates) >= 2 else ""
     week_line  = f"{week_label}  |  {week_dates}"
 
-    # Пишем в BD
+    # Пишем в BD одним запросом + обновляем in-memory кэш без повторного чтения
+    global _bd_rows, _bd_ts
+    header_row = ["User", "Date", "Day", "Time", "Plan", "Volume", "Remote", "Booked", "Comments"]
+    all_rows = [[week_line], header_row] + records
     bd = get_bd_sheet()
     bd.clear()
-    bd.update([[week_line]], "A1")
-    bd.update([["User", "Date", "Day", "Time", "Plan", "Volume", "Remote", "Booked", "Comments"]], "A2")
-    if records:
-        bd.update(records, "A3")
+    bd.update(all_rows, "A1")
+    _bd_rows = all_rows
+    _bd_ts   = time.time()
 
 # ═══════════════════════════════════════════════════════════════
 # ТРЕНЕР — ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -673,9 +676,13 @@ DAY_SHORT_RU = {
 
 def tr_get_current_week_days(override_row: int = -1) -> list[dict]:
     """Читает 7 дней недели прямо из листа 2026. override_row — если нужна не текущая неделя."""
+    global _week_days_cache, _week_days_ts
     row = override_row if override_row != -1 else _week_marker_row
     if row == -1:
         return []
+    # Кэш только для текущей недели (override = прошлая/следующая — не кэшируем)
+    if override_row == -1 and _week_days_cache and (time.time() - _week_days_ts) < BD_TTL:
+        return _week_days_cache
     data = get_source_sheet().get_all_values()
     result = []
     row_idx = row
@@ -703,6 +710,9 @@ def tr_get_current_week_days(override_row: int = -1) -> list[dict]:
             "is_remote":   is_remote,
         })
         row_idx += 5
+    if override_row == -1:
+        _week_days_cache = result
+        _week_days_ts    = time.time()
     return result
 
 def load_week_rows():
@@ -2182,8 +2192,6 @@ async def cb_tr_stats(callback: CallbackQuery):
 @dp.callback_query(F.data == "tr_trainings")
 async def cb_tr_trainings(callback: CallbackQuery):
     if not is_trainer(callback.from_user.id): return
-    if callback.data == "tr_trainings":
-        _invalidate_bd()
     _ensure_bd()
 
     uid = callback.from_user.id
