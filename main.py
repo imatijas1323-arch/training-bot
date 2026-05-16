@@ -2308,7 +2308,7 @@ async def cb_tr_trainings(callback: CallbackQuery):
 
     if week_active:
         if _week_collapsed:
-            rows_kb.append([InlineKeyboardButton(text="📂 Развернуть текущую неделю", callback_data="tr_texpand_curr")])
+            rows_kb.append([InlineKeyboardButton(text="📂 Развернуть текущую неделю", callback_data="tr_tcurr_expand")])
         else:
             rows_kb.append([InlineKeyboardButton(text="📦 Свернуть текущую неделю", callback_data="tr_tcollapse")])
     rows_kb.append([InlineKeyboardButton(text="◀️ Назад", callback_data="tr_menu")])
@@ -2699,7 +2699,7 @@ async def cb_tr_tcollapse(callback: CallbackQuery):
         except: pass
     await cb_tr_trainings(callback)
 
-@dp.callback_query(F.data == "tr_texpand_curr")
+@dp.callback_query(F.data == "tr_tcurr_expand")
 async def cb_tr_texpand_curr(callback: CallbackQuery):
     global _week_collapsed
     if not is_trainer(callback.from_user.id): return
