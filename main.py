@@ -1010,6 +1010,31 @@ def tr_write_volume_for_date(date_str: str, vol_text: str) -> int:
 # БРОНИРОВАНИЕ В ЛИСТЕ 2026
 # ═══════════════════════════════════════════════════════════════
 
+def tr_write_comment_for_date(date_str: str, comment_text: str) -> int:
+    """Записывает комментарий всем забронировавшим на указанную дату."""
+    rows = find_date_rows(date_str)
+    if not rows:
+        return 0
+    comment_row = rows["vol"] + 1
+    _ensure_bd()
+    hdr = _bd_rows[1] if len(_bd_rows) >= 2 else []
+    col = {h: i for i, h in enumerate(hdr)}
+    src = get_source_sheet()
+    written = 0
+    for row in _bd_rows[2:]:
+        if not row or col.get("Date", 1) >= len(row):
+            continue
+        if row[col["Date"]].strip() != date_str:
+            continue
+        if str(row[col.get("Booked", 7)]).upper() != "TRUE":
+            continue
+        user = str(row[col.get("User", 0)]).strip()
+        if user in USER_COLUMNS:
+            src.update(f"{USER_COLUMNS[user]}{comment_row}", [[comment_text]])
+            written += 1
+    _invalidate_bd()
+    return written
+
 def find_date_rows(date_str: str) -> dict | None:
     data = get_source_sheet().get_all_values()
     for i, row in enumerate(data):
@@ -2144,12 +2169,13 @@ async def cb_tr_trainings(callback: CallbackQuery):
         )])
 
         if is_expanded and d["participants"]:
-            # Кнопки участников (до 3 в ряд)
+            # Кнопки участников (до 3 в ряд); ✅ если план есть
             part_row = []
             for p in d["participants"]:
-                name_btn = p["name"] + (" 🏠" if p["remote"] else "")
+                plan_mark = "✅ " if p["plan"] else ""
+                remote_mark = " 🏠" if p["remote"] else ""
                 part_row.append(InlineKeyboardButton(
-                    text=name_btn,
+                    text=f"{plan_mark}{p['name']}{remote_mark}",
                     callback_data=f"tr_tpart_{date_str}_{p['name']}",
                 ))
                 if len(part_row) == 3:
@@ -2157,14 +2183,6 @@ async def cb_tr_trainings(callback: CallbackQuery):
                     part_row = []
             if part_row:
                 rows_kb.append(part_row)
-
-            # Кнопка плана
-            has_plan = any(p["plan"] for p in d["participants"])
-            plan_label = "📋 Есть план — изменить" if has_plan else "📋 Написать план"
-            rows_kb.append([InlineKeyboardButton(
-                text=plan_label,
-                callback_data=f"tr_wplan_{date_str}",
-            )])
 
     if week_active:
         rows_kb.append([InlineKeyboardButton(text="📦 Свернуть текущую неделю", callback_data="tr_tcollapse")])
@@ -2275,6 +2293,8 @@ async def cb_tr_tpart(callback: CallbackQuery):
         caption += f"📏 *Объём:* {p['volume']}\n"
 
     b = InlineKeyboardBuilder()
+    plan_btn = "✏️ Редактировать план" if p["plan"] else "📋 Написать план"
+    b.button(text=plan_btn, callback_data=f"tr_wplan_{date_str}")
     b.button(text="◀️ Назад к тренировкам", callback_data="tr_trainings")
     b.adjust(1)
     await callback.message.edit_caption(caption=caption, reply_markup=b.as_markup(), parse_mode="Markdown")
@@ -2302,12 +2322,13 @@ async def cb_tr_wplan(callback: CallbackQuery):
     }
     b = InlineKeyboardBuilder()
     b.button(text="◀️ Назад", callback_data="tr_trainings")
+    hint = "После `---` на отдельной строке — объём (запишется автоматически)."
     if current:
         caption = (f"✏️ *Редактировать план — {day_label}*\n\n"
-                   f"Текущий:\n_{current}_\n\nВведите новый текст:")
+                   f"Текущий:\n_{current}_\n\n{hint}\n\nВведите новый текст:")
     else:
         caption = (f"✏️ *Написать план — {day_label}*\n\n"
-                   f"Введите текст плана (будет записан всем участникам):")
+                   f"{hint}\n\nВведите текст плана:")
     await callback.message.edit_caption(caption=caption, reply_markup=b.as_markup(), parse_mode="Markdown")
     try: await callback.answer()
     except: pass
@@ -2356,6 +2377,12 @@ async def cb_tr_cplan(callback: CallbackQuery):
         except: pass
         return
     count = tr_write_plan_for_date(date_str, plan_text)
+    vol_text  = state.get("vol", "")
+    comm_text = state.get("comm", "")
+    if vol_text:
+        tr_write_volume_for_date(date_str, vol_text)
+    if comm_text:
+        tr_write_comment_for_date(date_str, comm_text)
     try: await callback.answer(f"✅ Сохранено для {count} уч." if count else "❌ Ошибка записи")
     except: pass
     callback.data = "tr_trainings"
@@ -2507,13 +2534,28 @@ async def handle_trainer_input(message: Message):
 
     elif action == "write_plan":
         date_str  = state.get("date", "")
-        plan_text = (message.text or "").strip()
+        raw_text  = (message.text or "").strip()
         chat_id   = state.get("chat_id")
         msg_id    = state.get("message_id")
-        if not plan_text:
+        if not raw_text:
             await message.reply("❌ Текст не может быть пустым.")
             return
-        _trainer_state[uid] = {"action": "confirm_plan", "date": date_str, "text": plan_text}
+        parts = re.split(r'\n?---+\n?', raw_text, maxsplit=2)
+        plan_text = parts[0].strip()
+        vol_text  = parts[1].strip() if len(parts) > 1 else ""
+        comm_text = parts[2].strip() if len(parts) > 2 else ""
+        _trainer_state[uid] = {
+            "action": "confirm_plan",
+            "date": date_str,
+            "text": plan_text,
+            "vol":  vol_text,
+            "comm": comm_text,
+        }
+        preview = f"📋 *План:*\n{plan_text}"
+        if vol_text:
+            preview += f"\n\n📏 *Объём:* {vol_text}"
+        if comm_text:
+            preview += f"\n\n💬 *Комментарий:* {comm_text}"
         b = InlineKeyboardBuilder()
         b.button(text="✅ Принять",  callback_data="tr_cplan")
         b.button(text="❌ Отменить", callback_data="tr_trainings")
@@ -2521,7 +2563,7 @@ async def handle_trainer_input(message: Message):
         try:
             await bot.edit_message_caption(
                 chat_id=chat_id, message_id=msg_id,
-                caption=f"✏️ *Сохранить план?*\n\n_{plan_text}_",
+                caption=f"✏️ *Сохранить?*\n\n{preview}",
                 reply_markup=b.as_markup(), parse_mode="Markdown")
         except Exception as e:
             print(f"handle_trainer_input write_plan error: {e}")
