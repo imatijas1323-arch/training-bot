@@ -2166,7 +2166,7 @@ async def cb_tr_trainings(callback: CallbackQuery):
             continue
         short = d["day_short"]
 
-        if d["is_no_train"]:
+        if d["is_no_train"] and not d["participants"]:
             rows_kb.append([InlineKeyboardButton(
                 text=f"❌ {short} {date_str[:5]} — нет тренировки",
                 callback_data="noop",
@@ -2174,7 +2174,9 @@ async def cb_tr_trainings(callback: CallbackQuery):
             continue
 
         # Заголовок дня — кликабельный аккордеон
-        time_part = f" {d['time']}" if d["time"] else (" удалённо" if d["is_remote"] else "")
+        time_part = "нет тренировки" if d["is_no_train"] else (
+            d["time"] if d["time"] else (" удалённо" if d["is_remote"] else "")
+        )
         n = len(d["participants"])
         n_str = f" — {n} уч." if n else ""
         icon = "🏠" if d["is_remote"] else "🏊"
