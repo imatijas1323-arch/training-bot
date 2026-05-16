@@ -2553,15 +2553,11 @@ async def cb_tr_cplan(callback: CallbackQuery):
         ok = tr_write_plan_for_user(date_str, name, plan_text)
         try: await callback.answer("✅ План сохранён" if ok else "❌ Ошибка записи")
         except: pass
-        callback.data = f"tr_tpart_{date_str}_{name}"
-        await cb_tr_tpart(callback)
     elif names:
         written = sum(1 for n in names if tr_write_plan_for_user(date_str, n, plan_text))
-        _tr_plan_sel.get(uid, {}).pop(date_str, None)  # сброс выбора после записи
+        _tr_plan_sel.get(uid, {}).pop(date_str, None)
         try: await callback.answer(f"✅ План записан для {written} уч.")
         except: pass
-        callback.data = "tr_trainings"
-        await cb_tr_trainings(callback)
     else:
         count = tr_write_plan_for_date(date_str, plan_text)
         vol_text  = state.get("vol", "")
@@ -2572,8 +2568,8 @@ async def cb_tr_cplan(callback: CallbackQuery):
             tr_write_comment_for_date(date_str, comm_text)
         try: await callback.answer(f"✅ Сохранено для {count} уч." if count else "❌ Ошибка записи")
         except: pass
-        callback.data = "tr_trainings"
-        await cb_tr_trainings(callback)
+    callback.data = "tr_trainings"
+    await cb_tr_trainings(callback)
 
 # ── Тренировки — подтвердить объём ──────────────────────────────
 @dp.callback_query(F.data == "tr_cvol")
