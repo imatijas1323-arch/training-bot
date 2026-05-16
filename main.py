@@ -2094,6 +2094,8 @@ async def cb_tr_stats(callback: CallbackQuery):
 @dp.callback_query(F.data == "tr_trainings")
 async def cb_tr_trainings(callback: CallbackQuery):
     if not is_trainer(callback.from_user.id): return
+    if callback.data == "tr_trainings":
+        _invalidate_bd()
     _ensure_bd()
 
     if not _bd_rows or not _bd_rows[0]:
