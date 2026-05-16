@@ -3,6 +3,7 @@ bot.py — Swimming Training Bot
 """
 
 import asyncio
+import html
 import os
 import re
 import time
@@ -2747,11 +2748,11 @@ async def handle_trainer_input(message: Message):
             "name":   state.get("name", ""),
             "names":  state.get("names", []),
         }
-        preview = f"📋 *План:*\n{plan_text}"
+        preview = f"📋 <b>План:</b>\n{html.escape(plan_text)}"
         if vol_text:
-            preview += f"\n\n📏 *Объём:* {vol_text}"
+            preview += f"\n\n📏 <b>Объём:</b> {html.escape(vol_text)}"
         if comm_text:
-            preview += f"\n\n💬 *Комментарий:* {comm_text}"
+            preview += f"\n\n💬 <b>Комментарий:</b> {html.escape(comm_text)}"
         b = InlineKeyboardBuilder()
         b.button(text="✅ Принять",  callback_data="tr_cplan")
         b.button(text="❌ Отменить", callback_data="tr_trainings")
@@ -2759,10 +2760,11 @@ async def handle_trainer_input(message: Message):
         try:
             await bot.edit_message_caption(
                 chat_id=chat_id, message_id=msg_id,
-                caption=f"✏️ *Сохранить?*\n\n{preview}",
-                reply_markup=b.as_markup(), parse_mode="Markdown")
+                caption=f"✏️ <b>Сохранить?</b>\n\n{preview}",
+                reply_markup=b.as_markup(), parse_mode="HTML")
         except Exception as e:
             print(f"handle_trainer_input write_plan error: {e}")
+            await message.reply(f"❌ Не удалось показать превью: {e}")
 
     elif action == "write_volume":
         date_str = state.get("date", "")
@@ -2780,10 +2782,11 @@ async def handle_trainer_input(message: Message):
         try:
             await bot.edit_message_caption(
                 chat_id=chat_id, message_id=msg_id,
-                caption=f"📏 *Сохранить объём?*\n\n_{vol_text}_",
-                reply_markup=b.as_markup(), parse_mode="Markdown")
+                caption=f"📏 <b>Сохранить объём?</b>\n\n{html.escape(vol_text)}",
+                reply_markup=b.as_markup(), parse_mode="HTML")
         except Exception as e:
             print(f"handle_trainer_input write_volume error: {e}")
+            await message.reply(f"❌ Не удалось показать превью: {e}")
 
     elif action in ("confirm_plan", "confirm_volume"):
         await message.reply("Нажмите ✅ *Принять* или ❌ *Отменить* в сообщении выше.", parse_mode="Markdown")
