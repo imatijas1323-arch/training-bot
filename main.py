@@ -146,6 +146,9 @@ def get_bd_sheet():
 def get_source_sheet():
     return ss.sheet1
 
+def get_sub_sheet():
+    return ss.worksheet("абонемент")
+
 def get_meta_sheet():
     for ws in ss.worksheets():
         if ws.title == "Meta":
@@ -202,6 +205,7 @@ _trainer_view_as:        dict[int, str]        = {}     # trainer_id → имя 
 _tr_expanded:            dict[int, str]        = {}     # trainer_id → развёрнутая дата в разделе Тренировки
 _tr_plan_sel:            dict[int, dict]       = {}     # trainer_id → {date_str: [names]} мультивыбор для плана
 _tr_viewing_prev:        set                   = set()  # trainer_id → просматривает прошлую неделю
+_sub_pending:            dict[int, dict]       = {}     # trainer_id → {name: pending_delta}
 BD_TTL = 300                                 # секунд (5 минут)
 
 STATES = [
@@ -852,22 +856,40 @@ def tr_set_time(date_str: str, time_str: str) -> bool:
 def tr_cancel_day(date_str: str) -> bool:
     return tr_set_time(date_str, "нет тренировки")
 
-def tr_get_subscription(user_name: str) -> int:
+def _sub_col(user_name: str) -> str:
+    """Колонка в листе 'абонемент': D→B, E→C, ... (2026 смещён на 2)"""
+    return chr(ord(USER_COLUMNS[user_name]) - 2)
+
+def _fmt_sub(val) -> str:
+    """91.0 → '91', 91.5 → '91.5'"""
     try:
-        col_idx = ord(USER_COLUMNS[user_name]) - ord("A") + 1
-        val = get_source_sheet().cell(9, col_idx).value
-        return int(float(str(val or "0")))
+        f = float(str(val).replace(",", "."))
+        return str(int(f)) if f == int(f) else f"{f:g}"
+    except Exception:
+        return str(val)
+
+def tr_get_subscription(user_name: str) -> float:
+    try:
+        col = _sub_col(user_name)
+        val = get_sub_sheet().acell(f"{col}5").value
+        return float(str(val or "0").replace(",", "."))
     except Exception as e:
         print(f"tr_get_subscription({user_name}) ошибка: {e}")
-        return 0
+        return 0.0
 
-def tr_set_subscription(user_name: str, value: int) -> bool:
+def tr_add_subscription(user_name: str, amount: float) -> bool:
+    """Добавляет строку оплаты в лист 'абонемент'; формулы пересчитают остаток сами."""
     try:
-        col_idx = ord(USER_COLUMNS[user_name]) - ord("A") + 1
-        get_source_sheet().update_cell(9, col_idx, value)
+        ws = get_sub_sheet()
+        col = _sub_col(user_name)
+        col_idx = ord(col) - ord("A") + 1
+        col_a = ws.col_values(1)
+        next_row = max(len(col_a) + 1, 9)
+        ws.update_cell(next_row, 1, _now().strftime("%d.%m.%Y"))
+        ws.update_cell(next_row, col_idx, amount)
         return True
     except Exception as e:
-        print(f"tr_set_subscription({user_name}) ошибка: {e}")
+        print(f"tr_add_subscription({user_name}) ошибка: {e}")
         return False
 
 def tr_set_grade(user_name: str, swim: str = None, dnf: str = None) -> bool:
@@ -1410,13 +1432,18 @@ def kb_trainer_dnf_grades(name: str):
     b.adjust(1)
     return b.as_markup()
 
-def kb_trainer_sub(name: str):
+def kb_trainer_sub(name: str, pending: float = 0):
     b = InlineKeyboardBuilder()
-    for delta in (+10, +5, +1, -1, -5, -10):
-        sign = "+" if delta > 0 else ""
-        b.button(text=f"{sign}{delta}", callback_data=f"tr_subdelta_{name}_{delta}")
-    b.button(text="◀️ Назад", callback_data=f"tr_student_{name}")
-    b.adjust(3, 3, 1)
+    for delta in (1, 5, 10):
+        b.button(text=f"+{delta}", callback_data=f"tr_subdelta_{name}_{delta}")
+    if pending:
+        b.button(text=f"✅ Сохранить (+{_fmt_sub(pending)})", callback_data=f"tr_subconfirm_{name}")
+        b.button(text="↩️ Сбросить", callback_data=f"tr_subcancel_{name}")
+        b.button(text="◀️ Назад", callback_data=f"tr_student_{name}")
+        b.adjust(3, 1, 1, 1)
+    else:
+        b.button(text="◀️ Назад", callback_data=f"tr_student_{name}")
+        b.adjust(3, 1)
     return b.as_markup()
 
 def kb_trainer_broadcast():
@@ -1985,9 +2012,12 @@ async def cb_tr_sub(callback: CallbackQuery):
     if not is_trainer(callback.from_user.id): return
     name    = callback.data[len("tr_sub_"):]
     current = tr_get_subscription(name)
+    pending = _sub_pending.get(callback.from_user.id, {}).get(name, 0.0)
+    caption = f"🎫 *Абонемент — {name}*\n\nОстаток: *{_fmt_sub(current)}* тренировок"
+    if pending:
+        caption += f"\nДобавляем: *+{_fmt_sub(pending)}* → будет *{_fmt_sub(current + pending)}*"
     await callback.message.edit_caption(
-        caption=f"🎫 *Абонемент — {name}*\n\nОстаток: *{current}* тренировок",
-        reply_markup=kb_trainer_sub(name), parse_mode="Markdown")
+        caption=caption, reply_markup=kb_trainer_sub(name, pending), parse_mode="Markdown")
     try: await callback.answer()
     except: pass
 
@@ -1997,13 +2027,54 @@ async def cb_tr_subdelta(callback: CallbackQuery):
     rest  = callback.data[len("tr_subdelta_"):]
     delta = int(rest.rsplit("_", 1)[1])
     name  = rest.rsplit("_", 1)[0]
-    new_val = tr_get_subscription(name) + delta
-    tr_set_subscription(name, new_val)
-    sign = "+" if delta > 0 else ""
+    tid   = callback.from_user.id
+    if tid not in _sub_pending:
+        _sub_pending[tid] = {}
+    _sub_pending[tid][name] = _sub_pending[tid].get(name, 0.0) + delta
+    pending = _sub_pending[tid][name]
+    current = tr_get_subscription(name)
+    caption = (f"🎫 *Абонемент — {name}*\n\n"
+               f"Остаток: *{_fmt_sub(current)}* тренировок\n"
+               f"Добавляем: *+{_fmt_sub(pending)}* → будет *{_fmt_sub(current + pending)}*")
     await callback.message.edit_caption(
-        caption=f"🎫 *Абонемент — {name}*\n\nОстаток: *{new_val}* тренировок",
+        caption=caption, reply_markup=kb_trainer_sub(name, pending), parse_mode="Markdown")
+    try: await callback.answer(f"+{delta}")
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_subconfirm_"))
+async def cb_tr_subconfirm(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    name    = callback.data[len("tr_subconfirm_"):]
+    tid     = callback.from_user.id
+    pending = _sub_pending.get(tid, {}).pop(name, 0.0)
+    if tid in _sub_pending and not _sub_pending[tid]:
+        del _sub_pending[tid]
+    ok = tr_add_subscription(name, pending) if pending else False
+    current = tr_get_subscription(name)
+    caption = f"🎫 *Абонемент — {name}*\n\nОстаток: *{_fmt_sub(current)}* тренировок"
+    if ok:
+        caption += f"\n\n✅ Добавлено +{_fmt_sub(pending)}"
+        await notify_user(name,
+            f"🎫 {name}, ваш абонемент пополнен на {_fmt_sub(pending)} тренировок!\n"
+            f"Остаток: *{_fmt_sub(current)}* тренировок.")
+    await callback.message.edit_caption(
+        caption=caption, reply_markup=kb_trainer_sub(name), parse_mode="Markdown")
+    try: await callback.answer("✅ Сохранено" if ok else "Нечего сохранять")
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_subcancel_"))
+async def cb_tr_subcancel(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    name = callback.data[len("tr_subcancel_"):]
+    tid  = callback.from_user.id
+    _sub_pending.get(tid, {}).pop(name, None)
+    if tid in _sub_pending and not _sub_pending[tid]:
+        del _sub_pending[tid]
+    current = tr_get_subscription(name)
+    await callback.message.edit_caption(
+        caption=f"🎫 *Абонемент — {name}*\n\nОстаток: *{_fmt_sub(current)}* тренировок",
         reply_markup=kb_trainer_sub(name), parse_mode="Markdown")
-    try: await callback.answer(f"{sign}{delta} → {new_val}")
+    try: await callback.answer("Сброшено")
     except: pass
 
 @dp.callback_query(F.data.startswith("tr_grade_swim_"))
@@ -3837,9 +3908,9 @@ async def notify_user(user_name: str, text: str, parse_mode: str | None = None):
 
 async def check_subscription(user_name: str):
     try:
-        col       = USER_COLUMNS[user_name]
-        remaining = get_source_sheet().acell(f"{col}9").value or "0"
-        left      = int(str(remaining).replace(" ", "").replace(",", "") or "0")
+        col       = _sub_col(user_name)
+        remaining = get_sub_sheet().acell(f"{col}5").value or "0"
+        left      = float(str(remaining).replace(" ", "").replace(",", "."))
         if left < 0:
             await notify_user(user_name,
                 f"🚨 {user_name}, вы ушли в минус: {left} тренировок.\n"
