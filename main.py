@@ -468,8 +468,10 @@ def add_new_student_to_sheets(name: str) -> tuple[bool, str]:
         row3 = ab_ws.row_values(3)
         ab_ins  = next((i for i, v in enumerate(row3) if "Группа 2" in str(v)), 14)
 
-        new_col = chr(ord('A') + src_ins)   # буква новой колонки в 2026, напр. 'Q'
-        ab_col  = chr(ord('A') + ab_ins)    # буква новой колонки в абонемент, напр. 'O'
+        new_col  = chr(ord('A') + src_ins)       # буква новой колонки в 2026, напр. 'Q'
+        ab_col   = chr(ord('A') + ab_ins)        # буква новой колонки в абонемент, напр. 'O'
+        prev_col = chr(ord('A') + src_ins - 1)   # предыдущий ученик, напр. 'P' (Маша)
+        prev_ab  = chr(ord('A') + ab_ins  - 1)   # предыдущий в абонемент, напр. 'N'
 
         # Шаг 1: вставить колонки
         ss.batch_update({"requests": [
@@ -483,49 +485,57 @@ def add_new_student_to_sheets(name: str) -> tuple[bool, str]:
             }, "inheritFromBefore": True}},
         ]})
 
-        # Шаг 2: скопировать data validation (чекбоксы) по всем строкам 2026
-        # и формулы строк 3–6 абонемента из соседней колонки
-        ss.batch_update({"requests": [
-            {"copyPaste": {
-                "source":      {"sheetId": src_id, "startRowIndex": 0, "endRowIndex": 1900,
-                                "startColumnIndex": src_ins - 1, "endColumnIndex": src_ins},
-                "destination": {"sheetId": src_id, "startRowIndex": 0, "endRowIndex": 1900,
-                                "startColumnIndex": src_ins, "endColumnIndex": src_ins + 1},
-                "pasteType": "PASTE_DATA_VALIDATION",
-            }},
-            {"copyPaste": {
-                "source":      {"sheetId": ab_id, "startRowIndex": 2, "endRowIndex": 6,
-                                "startColumnIndex": ab_ins - 1, "endColumnIndex": ab_ins},
-                "destination": {"sheetId": ab_id, "startRowIndex": 2, "endRowIndex": 6,
-                                "startColumnIndex": ab_ins, "endColumnIndex": ab_ins + 1},
-                "pasteType": "PASTE_FORMULA",
-            }},
-        ]})
+        # Шаг 2: чекбоксы для строк бронирования через setDataValidation
+        # Структура: строка 13 + week*35 + day*5 (1-based) = 0-based: 12 + week*35 + day*5
+        dv_requests = []
+        for w in range(60):
+            for d in range(7):
+                r = 12 + w * 35 + d * 5
+                if r >= 1900:
+                    break
+                dv_requests.append({"setDataValidation": {
+                    "range": {"sheetId": src_id,
+                              "startRowIndex": r, "endRowIndex": r + 1,
+                              "startColumnIndex": src_ins, "endColumnIndex": src_ins + 1},
+                    "rule": {"condition": {"type": "BOOLEAN"}, "showCustomUi": True},
+                }})
+        ss.batch_update({"requests": dv_requests})
 
-        # Шаг 3: скопировать формулы строк 1–12 из 2026 (метры, HLOOKUP абонемента)
-        ss.batch_update({"requests": [
-            {"copyPaste": {
-                "source":      {"sheetId": src_id, "startRowIndex": 0, "endRowIndex": 12,
-                                "startColumnIndex": src_ins - 1, "endColumnIndex": src_ins},
-                "destination": {"sheetId": src_id, "startRowIndex": 0, "endRowIndex": 12,
-                                "startColumnIndex": src_ins, "endColumnIndex": src_ins + 1},
-                "pasteType": "PASTE_FORMULA",
-            }},
-        ]})
+        # Шаг 3: формулы строк 1–12 из предыдущего ученика (метры, HLOOKUP абонемента)
+        # Заменяем ссылки на prev_col → new_col в каждой формуле
+        def _adapt(formula):
+            if not formula or not str(formula).startswith('='):
+                return formula
+            return re.sub(rf'(?<![A-Za-z$]){re.escape(prev_col)}(?![A-Za-z])',
+                          new_col, str(formula))
 
-        # Шаг 4: записать имя и обнулить личные данные
+        for r in (5, 7, 8, 9, 10):
+            val = src_ws.acell(f'{prev_col}{r}', value_render_option='FORMULA').value
+            src_ws.update(f'{new_col}{r}', [[_adapt(val)]])
+
+        # Шаг 4: имя, TG ID, метры
         src_ws.update(f"{new_col}1",  [[name]])
+        src_ws.update(f"{new_col}4",  [[0]])     # метры 2025 = 0
         src_ws.update(f"{new_col}6",  [[""]])    # TG ID — пусто
         src_ws.update(f"{new_col}12", [[name]])
-        src_ws.update(f"{new_col}4",  [[0]])     # метры 2025
-        src_ws.update(f"{new_col}5",  [[0]])     # метры 2026
-        ab_ws.update(f"{ab_col}3",    [[name]])
 
-        # Шаг 5: обновить USER_COLUMNS + сохранить в Meta
+        # Шаг 5: абонемент — формулы строк 4–5 + имя
+        def _adapt_ab(formula):
+            if not formula or not str(formula).startswith('='):
+                return formula
+            return re.sub(rf'(?<![A-Za-z$]){re.escape(prev_ab)}(?![A-Za-z])',
+                          ab_col, str(formula))
+
+        for r in (4, 5):
+            val = ab_ws.acell(f'{prev_ab}{r}', value_render_option='FORMULA').value
+            ab_ws.update(f'{ab_col}{r}', [[_adapt_ab(val)]])
+        ab_ws.update(f"{ab_col}3", [[name]])
+
+        # Шаг 6: USER_COLUMNS + Meta
         USER_COLUMNS[name] = new_col
         save_student_to_meta(name, new_col)
 
-        # Шаг 6: GradeCurrent
+        # Шаг 7: GradeCurrent
         get_grade_current_sheet().append_row([name, "", ""])
         _known_grades[name]     = ""
         _known_dnf_grades[name] = ""
