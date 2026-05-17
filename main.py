@@ -916,19 +916,28 @@ def tr_set_grade(user_name: str, swim: str = None, dnf: str = None) -> bool:
         return False
 
 def tr_get_week_stats() -> dict:
+    """Возвращает {name: {count, volume}} по забронированным тренировкам текущей недели."""
     _ensure_bd()
     if len(_bd_rows) < 2:
         return {}
     hdr = _bd_rows[1]
     col = {h: i for i, h in enumerate(hdr)}
-    stats: dict[str, int] = {}
+    stats: dict[str, dict] = {}
     for row in _bd_rows[2:]:
         if not row:
             continue
-        name = str(row[col.get("User", 0)]).strip() if col.get("User", 0) < len(row) else ""
-        booked = str(row[col.get("Booked", 7)]).upper() if col.get("Booked", 7) < len(row) else ""
+        name    = str(row[col.get("User",   0)]).strip() if col.get("User",   0) < len(row) else ""
+        booked  = str(row[col.get("Booked", 7)]).upper() if col.get("Booked", 7) < len(row) else ""
+        vol_raw = str(row[col.get("Volume", 5)]).strip() if col.get("Volume", 5) < len(row) else ""
         if name and booked == "TRUE":
-            stats[name] = stats.get(name, 0) + 1
+            if name not in stats:
+                stats[name] = {"count": 0, "volume": 0}
+            stats[name]["count"] += 1
+            try:
+                vol = int(float(re.sub(r"[^\d.]", "", vol_raw.replace(",", "."))))
+                stats[name]["volume"] += vol
+            except Exception:
+                pass
     return stats
 
 def tr_get_student_bookings(user_name: str) -> list:
@@ -2242,11 +2251,24 @@ async def cb_tr_stats(callback: CallbackQuery):
     if not is_trainer(callback.from_user.id): return
     stats = tr_get_week_stats()
     if stats:
-        lines = [f"• {n}: {c} тр." for n, c in sorted(stats.items(), key=lambda x: -x[1])]
-        text  = (f"📊 *Статистика недели*\n\n"
-                 f"Всего записей: {sum(stats.values())}\n"
-                 f"Активных: {len(stats)}/{len(USER_COLUMNS)}\n\n"
-                 + "\n".join(lines))
+        def _tr(n):
+            return "тренировка" if n % 10 == 1 and n % 100 != 11 else \
+                   "тренировки" if n % 10 in (2,3,4) and n % 100 not in (12,13,14) else \
+                   "тренировок"
+        def _vol(v):
+            return f"{v:,}".replace(",", " ") + " м" if v else ""
+        lines = []
+        for name, s in sorted(stats.items(), key=lambda x: -x[1]["count"]):
+            c, v = s["count"], s["volume"]
+            vol_str = f", объём {_vol(v)}" if v else ""
+            lines.append(f"• {name}: {c} {_tr(c)}{vol_str}")
+        total_count  = sum(s["count"]  for s in stats.values())
+        total_volume = sum(s["volume"] for s in stats.values())
+        vol_line = f"\n🌊 Общий объём сообщества: *{_vol(total_volume)}*" if total_volume else ""
+        text = (f"📊 *Статистика недели*\n\n"
+                f"Всего записей: {total_count} | "
+                f"Активных: {len(stats)}/{len(USER_COLUMNS)}\n\n"
+                + "\n".join(lines) + vol_line)
     else:
         text = "📊 *Статистика*\n\nДанных нет"
     b = InlineKeyboardBuilder()
