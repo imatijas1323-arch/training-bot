@@ -2264,11 +2264,17 @@ async def cb_tr_stats(callback: CallbackQuery):
             lines.append(f"• {name}: {c} {_tr(c)}{vol_str}")
         total_count  = sum(s["count"]  for s in stats.values())
         total_volume = sum(s["volume"] for s in stats.values())
-        vol_line = f"\n🌊 Общий объём сообщества: *{_vol(total_volume)}*" if total_volume else ""
+        week_vol_line = f"\n🌊 Объём за неделю: *{_vol(total_volume)}*" if total_volume else ""
+        try:
+            c5 = get_source_sheet().acell("C5").value or "0"
+            year_vol = int(float(str(c5).replace("\xa0", "").replace(" ", "").replace(",", ".")))
+            year_vol_line = f"\n🏊 Общий объём сообщества за 2026: *{_vol(year_vol)}*"
+        except Exception:
+            year_vol_line = ""
         text = (f"📊 *Статистика недели*\n\n"
                 f"Всего записей: {total_count} | "
                 f"Активных: {len(stats)}/{len(USER_COLUMNS)}\n\n"
-                + "\n".join(lines) + vol_line)
+                + "\n".join(lines) + week_vol_line + year_vol_line)
     else:
         text = "📊 *Статистика*\n\nДанных нет"
     b = InlineKeyboardBuilder()
