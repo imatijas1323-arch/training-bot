@@ -477,6 +477,63 @@ def restore_student(name: str):
             ws.delete_rows(i + 1)
             break
 
+def delete_student(name: str) -> tuple[bool, str]:
+    """Полное удаление ученика: колонки в 2026 и абонемент, записи в Meta/GradeCurrent, кэши."""
+    try:
+        col = USER_COLUMNS.get(name)
+        if not col:
+            return False, "Ученик не найден в USER_COLUMNS"
+        src_ws    = get_source_sheet()
+        ab_ws     = get_sub_sheet()
+        src_idx   = ord(col) - ord('A')
+        ab_col    = chr(ord(col) - 2)
+        ab_idx    = ord(ab_col) - ord('A')
+        ss.batch_update({"requests": [
+            {"deleteDimension": {"range": {
+                "sheetId": src_ws.id, "dimension": "COLUMNS",
+                "startIndex": src_idx, "endIndex": src_idx + 1
+            }}},
+            {"deleteDimension": {"range": {
+                "sheetId": ab_ws.id, "dimension": "COLUMNS",
+                "startIndex": ab_idx, "endIndex": ab_idx + 1
+            }}},
+        ]})
+        # Meta: удаляем все строки с именем (student + archived)
+        meta = get_meta_sheet()
+        rows = meta.get_all_values()
+        to_del = sorted([i + 1 for i, r in enumerate(rows)
+                         if len(r) >= 2 and r[1].strip() == name and r[0] in ("student", "archived")],
+                        reverse=True)
+        for rn in to_del:
+            meta.delete_rows(rn)
+        # GradeCurrent
+        try:
+            gc_ws = get_grade_current_sheet()
+            gc_rows = gc_ws.get_all_values()
+            for i, r in enumerate(gc_rows):
+                if r and r[0].strip() == name:
+                    gc_ws.delete_rows(i + 1)
+                    break
+        except Exception:
+            pass
+        # Кэши
+        USER_COLUMNS.pop(name, None)
+        _archived_students.discard(name)
+        _known_grades.pop(name, None)
+        _known_dnf_grades.pop(name, None)
+        _last_booking.pop(name, None)
+        _inactivity_notified.discard(name)
+        tid = _tid_cache.pop(name, None)
+        if tid:
+            _user_cache.pop(tid, None)
+        return True, col
+    except Exception as e:
+        import traceback as _tb
+        err = f"{type(e).__name__}: {e}"
+        print(f"delete_student({name}) ошибка: {err}")
+        _tb.print_exc()
+        return False, err
+
 def add_new_student_to_sheets(name: str) -> tuple[bool, str]:
     """Вставляет колонку нового ученика в 2026 и абонемент. Возвращает (ok, col_letter)."""
     try:
@@ -1585,6 +1642,7 @@ def kb_trainer_archive():
 def kb_trainer_archived_student(name: str):
     b = InlineKeyboardBuilder()
     b.button(text="↩️ Вернуть из архива", callback_data=f"tr_restore_{name}")
+    b.button(text="🗑 Удалить навсегда",   callback_data=f"tr_delete_{name}")
     b.button(text="◀️ Назад",             callback_data="tr_archive")
     b.adjust(1)
     return b.as_markup()
@@ -2461,6 +2519,39 @@ async def cb_tr_archived_student(callback: CallbackQuery):
     await callback.message.edit_caption(caption=text, reply_markup=kb_trainer_archived_student(name), parse_mode="Markdown")
     try: await callback.answer()
     except: pass
+
+@dp.callback_query(F.data.startswith("tr_delete_") & ~F.data.startswith("tr_delete_yes_"))
+async def cb_tr_delete(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    name = callback.data[len("tr_delete_"):]
+    b = InlineKeyboardBuilder()
+    b.button(text="⚠️ Да, удалить навсегда", callback_data=f"tr_delete_yes_{name}")
+    b.button(text="❌ Отмена",               callback_data=f"tr_archived_{name}")
+    b.adjust(1)
+    await callback.message.edit_caption(
+        caption=f"🗑 Удалить *{name}* навсегда?\n\nКолонка будет удалена из таблицы. Это действие *необратимо*.",
+        reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_delete_yes_"))
+async def cb_tr_delete_yes(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    name = callback.data[len("tr_delete_yes_"):]
+    await callback.message.edit_caption(caption=f"⏳ Удаляю *{name}*...", parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+    ok, col_or_err = delete_student(name)
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ К ученикам", callback_data="tr_students")
+    if ok:
+        await callback.message.edit_caption(
+            caption=f"✅ *{name}* удалён (колонка {col_or_err}).",
+            reply_markup=b.as_markup(), parse_mode="Markdown")
+    else:
+        await callback.message.edit_caption(
+            caption=f"❌ Ошибка при удалении *{name}*\n\n`{col_or_err}`",
+            reply_markup=b.as_markup(), parse_mode="Markdown")
 
 # ── Рассылка ────────────────────────────────────────────────────
 @dp.callback_query(F.data == "tr_broadcast")
