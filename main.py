@@ -550,20 +550,19 @@ def add_new_student_to_sheets(name: str) -> tuple[bool, str]:
         src_ws.update([[""]],   f"{new_col}6")   # TG ID — пусто
         src_ws.update([[name]], f"{new_col}12")
 
-        # Шаг 5: абонемент — формулы строк 4–5 + имя
+        # Шаг 5: абонемент — row4 (сумма пополнений), row5 = остаток, имя
+        val4 = ab_ws.acell(f'{prev_ab}4', value_render_option='FORMULA').value
         def _adapt_ab(formula):
-            if not formula or not str(formula).startswith('='):
-                return formula
+            if not formula or not str(formula).startswith('='): return formula
             return re.sub(rf'(?<![A-Za-z$]){re.escape(prev_ab)}(?![A-Za-z])',
                           ab_col, str(formula))
-
-        for r in (4, 5):
-            val = ab_ws.acell(f'{prev_ab}{r}', value_render_option='FORMULA').value
-            adapted = _adapt_ab(val)
-            if adapted and str(adapted).startswith('='):
-                ab_ws.update([[adapted]], f'{ab_col}{r}', raw=False)
-            elif adapted is not None:
-                ab_ws.update([[adapted]], f'{ab_col}{r}')
+        adapted4 = _adapt_ab(val4)
+        if adapted4 and str(adapted4).startswith('='):
+            ab_ws.update([[adapted4]], f'{ab_col}4', raw=False)
+        else:
+            ab_ws.update([[adapted4 or 0]], f'{ab_col}4')
+        # Row 5 — остаток: просто =<ab_col>4 (у нового ученика нет истории)
+        ab_ws.update([[f'={ab_col}4']], f'{ab_col}5', raw=False)
         ab_ws.update([[name]], f"{ab_col}3")
 
         # Шаг 6: USER_COLUMNS + Meta
@@ -577,9 +576,11 @@ def add_new_student_to_sheets(name: str) -> tuple[bool, str]:
 
         return True, new_col
     except Exception as e:
-        print(f"add_new_student_to_sheets({name}) ошибка: {e}")
-        import traceback; traceback.print_exc()
-        return False, ""
+        import traceback as _tb
+        err = f"{type(e).__name__}: {e}"
+        print(f"add_new_student_to_sheets({name}) ошибка: {err}")
+        _tb.print_exc()
+        return False, err
 
 # ═══════════════════════════════════════════════════════════════
 # РАСПИСАНИЕ ИЗ BD
@@ -2175,16 +2176,16 @@ async def cb_tr_adost(callback: CallbackQuery):
         parse_mode="Markdown")
     try: await callback.answer()
     except: pass
-    ok, col = add_new_student_to_sheets(name)
+    ok, col_or_err = add_new_student_to_sheets(name)
     b = InlineKeyboardBuilder()
     b.button(text="◀️ К ученикам", callback_data="tr_students")
     if ok:
         await callback.message.edit_caption(
-            caption=f"✅ *{name}* добавлен!\n\nКолонка: *{col}*\n\nТеперь ученик может написать /start и выбрать своё имя.",
+            caption=f"✅ *{name}* добавлен!\n\nКолонка: *{col_or_err}*\n\nТеперь ученик может написать /start и выбрать своё имя.",
             reply_markup=b.as_markup(), parse_mode="Markdown")
     else:
         await callback.message.edit_caption(
-            caption=f"❌ Не удалось добавить *{name}*.\nПроверьте логи.",
+            caption=f"❌ Не удалось добавить *{name}*\n\n`{col_or_err}`",
             reply_markup=b.as_markup(), parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("tr_student_") & ~F.data.startswith("tr_students"))
