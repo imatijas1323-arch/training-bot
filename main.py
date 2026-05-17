@@ -514,11 +514,12 @@ def add_new_student_to_sheets(name: str) -> tuple[bool, str]:
 
         # Шаг 2: чекбоксы для строк бронирования через setDataValidation
         # Структура: строка 13 + week*35 + day*5 (1-based) = 0-based: 12 + week*35 + day*5
+        max_row = src_ws.row_count  # реальный размер листа (сейчас 1894)
         dv_requests = []
         for w in range(60):
             for d in range(7):
                 r = 12 + w * 35 + d * 5
-                if r >= 1900:
+                if r + 1 > max_row:
                     break
                 dv_requests.append({"setDataValidation": {
                     "range": {"sheetId": src_id,
