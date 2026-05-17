@@ -462,28 +462,32 @@ def add_new_student_to_sheets(name: str) -> tuple[bool, str]:
         src_id = src_ws.id
         ab_id  = ab_ws.id
 
-        # Найти позицию "Группа 2" динамически (сдвигается при каждом добавлении)
+        # prev_col = последний известный ученик (макс. по алфавиту)
+        prev_col = max(USER_COLUMNS.values())    # 'P' (Маша) при стандартном списке
+        prev_ab  = chr(ord(prev_col) - 2)        # 'N' (смещение 2026→абонемент)
+        src_ins  = ord(prev_col) - ord('A') + 1  # 0-based индекс сразу после prev_col
+        ab_ins   = ord(prev_ab)  - ord('A') + 1
+        new_col  = chr(ord('A') + src_ins)       # 'Q'
+        ab_col   = chr(ord('A') + ab_ins)        # 'O'
+
+        # Шаг 1: вставить колонки (пропустить если orphan уже стоит на нужном месте)
         row1 = src_ws.row_values(1)
-        src_ins = next((i for i, v in enumerate(row1) if "Группа 2" in str(v)), 16)
         row3 = ab_ws.row_values(3)
-        ab_ins  = next((i for i, v in enumerate(row3) if "Группа 2" in str(v)), 14)
-
-        new_col  = chr(ord('A') + src_ins)       # буква новой колонки в 2026, напр. 'Q'
-        ab_col   = chr(ord('A') + ab_ins)        # буква новой колонки в абонемент, напр. 'O'
-        prev_col = chr(ord('A') + src_ins - 1)   # предыдущий ученик, напр. 'P' (Маша)
-        prev_ab  = chr(ord('A') + ab_ins  - 1)   # предыдущий в абонемент, напр. 'N'
-
-        # Шаг 1: вставить колонки
-        ss.batch_update({"requests": [
-            {"insertDimension": {"range": {
+        slot_src_empty = (len(row1) <= src_ins or str(row1[src_ins]).strip() == '')
+        slot_ab_empty  = (len(row3) <= ab_ins  or str(row3[ab_ins]).strip() == '')
+        ins_requests = []
+        if not slot_src_empty:
+            ins_requests.append({"insertDimension": {"range": {
                 "sheetId": src_id, "dimension": "COLUMNS",
                 "startIndex": src_ins, "endIndex": src_ins + 1
-            }, "inheritFromBefore": True}},
-            {"insertDimension": {"range": {
+            }, "inheritFromBefore": True}})
+        if not slot_ab_empty:
+            ins_requests.append({"insertDimension": {"range": {
                 "sheetId": ab_id, "dimension": "COLUMNS",
                 "startIndex": ab_ins, "endIndex": ab_ins + 1
-            }, "inheritFromBefore": True}},
-        ]})
+            }, "inheritFromBefore": True}})
+        if ins_requests:
+            ss.batch_update({"requests": ins_requests})
 
         # Шаг 2: чекбоксы для строк бронирования через setDataValidation
         # Структура: строка 13 + week*35 + day*5 (1-based) = 0-based: 12 + week*35 + day*5
@@ -501,8 +505,7 @@ def add_new_student_to_sheets(name: str) -> tuple[bool, str]:
                 }})
         ss.batch_update({"requests": dv_requests})
 
-        # Шаг 3: формулы строк 1–12 из предыдущего ученика (метры, HLOOKUP абонемента)
-        # Заменяем ссылки на prev_col → new_col в каждой формуле
+        # Шаг 3: формулы строк из предыдущего ученика (метры 2026, кол-во тр-к, абонемент…)
         def _adapt(formula):
             if not formula or not str(formula).startswith('='):
                 return formula
@@ -511,13 +514,17 @@ def add_new_student_to_sheets(name: str) -> tuple[bool, str]:
 
         for r in (5, 7, 8, 9, 10):
             val = src_ws.acell(f'{prev_col}{r}', value_render_option='FORMULA').value
-            src_ws.update(f'{new_col}{r}', [[_adapt(val)]])
+            adapted = _adapt(val)
+            if adapted and str(adapted).startswith('='):
+                src_ws.update([[adapted]], f'{new_col}{r}', raw=False)
+            elif adapted is not None:
+                src_ws.update([[adapted]], f'{new_col}{r}')
 
         # Шаг 4: имя, TG ID, метры
-        src_ws.update(f"{new_col}1",  [[name]])
-        src_ws.update(f"{new_col}4",  [[0]])     # метры 2025 = 0
-        src_ws.update(f"{new_col}6",  [[""]])    # TG ID — пусто
-        src_ws.update(f"{new_col}12", [[name]])
+        src_ws.update([[name]], f"{new_col}1")
+        src_ws.update([[0]],    f"{new_col}4")   # метры 2025 = 0
+        src_ws.update([[""]],   f"{new_col}6")   # TG ID — пусто
+        src_ws.update([[name]], f"{new_col}12")
 
         # Шаг 5: абонемент — формулы строк 4–5 + имя
         def _adapt_ab(formula):
@@ -528,8 +535,12 @@ def add_new_student_to_sheets(name: str) -> tuple[bool, str]:
 
         for r in (4, 5):
             val = ab_ws.acell(f'{prev_ab}{r}', value_render_option='FORMULA').value
-            ab_ws.update(f'{ab_col}{r}', [[_adapt_ab(val)]])
-        ab_ws.update(f"{ab_col}3", [[name]])
+            adapted = _adapt_ab(val)
+            if adapted and str(adapted).startswith('='):
+                ab_ws.update([[adapted]], f'{ab_col}{r}', raw=False)
+            elif adapted is not None:
+                ab_ws.update([[adapted]], f'{ab_col}{r}')
+        ab_ws.update([[name]], f"{ab_col}3")
 
         # Шаг 6: USER_COLUMNS + Meta
         USER_COLUMNS[name] = new_col
