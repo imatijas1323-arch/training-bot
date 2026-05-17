@@ -439,6 +439,103 @@ def load_last_bookings():
     except Exception as e:
         print(f"load_last_bookings ошибка: {e}")
 
+def load_extra_students():
+    """Загружает учеников добавленных через бот (строки ['student', name, col] в Meta)."""
+    try:
+        rows = get_meta_sheet().get_all_values()
+        for row in rows:
+            if len(row) >= 3 and row[0] == "student":
+                name, col = row[1].strip(), row[2].strip()
+                if name and col and name not in USER_COLUMNS:
+                    USER_COLUMNS[name] = col
+    except Exception as e:
+        print(f"load_extra_students ошибка: {e}")
+
+def save_student_to_meta(name: str, col: str):
+    get_meta_sheet().append_row(["student", name, col])
+
+def add_new_student_to_sheets(name: str) -> tuple[bool, str]:
+    """Вставляет колонку нового ученика в 2026 и абонемент. Возвращает (ok, col_letter)."""
+    try:
+        src_ws = get_source_sheet()
+        ab_ws  = get_sub_sheet()
+        src_id = src_ws.id
+        ab_id  = ab_ws.id
+
+        # Найти позицию "Группа 2" динамически (сдвигается при каждом добавлении)
+        row1 = src_ws.row_values(1)
+        src_ins = next((i for i, v in enumerate(row1) if "Группа 2" in str(v)), 16)
+        row3 = ab_ws.row_values(3)
+        ab_ins  = next((i for i, v in enumerate(row3) if "Группа 2" in str(v)), 14)
+
+        new_col = chr(ord('A') + src_ins)   # буква новой колонки в 2026, напр. 'Q'
+        ab_col  = chr(ord('A') + ab_ins)    # буква новой колонки в абонемент, напр. 'O'
+
+        # Шаг 1: вставить колонки
+        ss.batch_update({"requests": [
+            {"insertDimension": {"range": {
+                "sheetId": src_id, "dimension": "COLUMNS",
+                "startIndex": src_ins, "endIndex": src_ins + 1
+            }, "inheritFromBefore": True}},
+            {"insertDimension": {"range": {
+                "sheetId": ab_id, "dimension": "COLUMNS",
+                "startIndex": ab_ins, "endIndex": ab_ins + 1
+            }, "inheritFromBefore": True}},
+        ]})
+
+        # Шаг 2: скопировать data validation (чекбоксы) по всем строкам 2026
+        # и формулы строк 3–6 абонемента из соседней колонки
+        ss.batch_update({"requests": [
+            {"copyPaste": {
+                "source":      {"sheetId": src_id, "startRowIndex": 0, "endRowIndex": 1900,
+                                "startColumnIndex": src_ins - 1, "endColumnIndex": src_ins},
+                "destination": {"sheetId": src_id, "startRowIndex": 0, "endRowIndex": 1900,
+                                "startColumnIndex": src_ins, "endColumnIndex": src_ins + 1},
+                "pasteType": "PASTE_DATA_VALIDATION",
+            }},
+            {"copyPaste": {
+                "source":      {"sheetId": ab_id, "startRowIndex": 2, "endRowIndex": 6,
+                                "startColumnIndex": ab_ins - 1, "endColumnIndex": ab_ins},
+                "destination": {"sheetId": ab_id, "startRowIndex": 2, "endRowIndex": 6,
+                                "startColumnIndex": ab_ins, "endColumnIndex": ab_ins + 1},
+                "pasteType": "PASTE_FORMULA",
+            }},
+        ]})
+
+        # Шаг 3: скопировать формулы строк 1–12 из 2026 (метры, HLOOKUP абонемента)
+        ss.batch_update({"requests": [
+            {"copyPaste": {
+                "source":      {"sheetId": src_id, "startRowIndex": 0, "endRowIndex": 12,
+                                "startColumnIndex": src_ins - 1, "endColumnIndex": src_ins},
+                "destination": {"sheetId": src_id, "startRowIndex": 0, "endRowIndex": 12,
+                                "startColumnIndex": src_ins, "endColumnIndex": src_ins + 1},
+                "pasteType": "PASTE_FORMULA",
+            }},
+        ]})
+
+        # Шаг 4: записать имя и обнулить личные данные
+        src_ws.update(f"{new_col}1",  [[name]])
+        src_ws.update(f"{new_col}6",  [[""]])    # TG ID — пусто
+        src_ws.update(f"{new_col}12", [[name]])
+        src_ws.update(f"{new_col}4",  [[0]])     # метры 2025
+        src_ws.update(f"{new_col}5",  [[0]])     # метры 2026
+        ab_ws.update(f"{ab_col}3",    [[name]])
+
+        # Шаг 5: обновить USER_COLUMNS + сохранить в Meta
+        USER_COLUMNS[name] = new_col
+        save_student_to_meta(name, new_col)
+
+        # Шаг 6: GradeCurrent
+        get_grade_current_sheet().append_row([name, "", ""])
+        _known_grades[name]     = ""
+        _known_dnf_grades[name] = ""
+
+        return True, new_col
+    except Exception as e:
+        print(f"add_new_student_to_sheets({name}) ошибка: {e}")
+        import traceback; traceback.print_exc()
+        return False, ""
+
 # ═══════════════════════════════════════════════════════════════
 # РАСПИСАНИЕ ИЗ BD
 # ═══════════════════════════════════════════════════════════════
@@ -1405,8 +1502,10 @@ def kb_trainer_students():
         grade = _known_grades.get(name, "")
         label = f"{name}  {grade}".strip() if grade else name
         b.button(text=label, callback_data=f"tr_student_{name}")
-    b.button(text="◀️ Назад", callback_data="tr_menu")
     b.adjust(2)
+    b.button(text="➕ Добавить ученика", callback_data="tr_add_student")
+    b.button(text="◀️ Назад",            callback_data="tr_menu")
+    b.adjust(2, 1, 1)
     return b.as_markup()
 
 def kb_trainer_student(name: str):
@@ -1980,6 +2079,44 @@ async def cb_tr_students(callback: CallbackQuery):
         reply_markup=kb_trainer_students(), parse_mode="Markdown")
     try: await callback.answer()
     except: pass
+
+@dp.callback_query(F.data == "tr_add_student")
+async def cb_tr_add_student(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    uid = callback.from_user.id
+    _trainer_state[uid] = {
+        "action":     "add_student",
+        "chat_id":    callback.message.chat.id,
+        "message_id": callback.message.message_id,
+    }
+    b = InlineKeyboardBuilder()
+    b.button(text="❌ Отмена", callback_data="tr_students")
+    await callback.message.edit_caption(
+        caption="➕ *Добавить ученика*\n\nВведите имя нового ученика:",
+        reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_adost_"))
+async def cb_tr_adost(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    name = callback.data[len("tr_adost_"):]
+    await callback.message.edit_caption(
+        caption=f"⏳ Добавляю *{name}*...\n\nЭто займёт несколько секунд.",
+        parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+    ok, col = add_new_student_to_sheets(name)
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ К ученикам", callback_data="tr_students")
+    if ok:
+        await callback.message.edit_caption(
+            caption=f"✅ *{name}* добавлен!\n\nКолонка: *{col}*\n\nТеперь ученик может написать /start и выбрать своё имя.",
+            reply_markup=b.as_markup(), parse_mode="Markdown")
+    else:
+        await callback.message.edit_caption(
+            caption=f"❌ Не удалось добавить *{name}*.\nПроверьте логи.",
+            reply_markup=b.as_markup(), parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("tr_student_") & ~F.data.startswith("tr_students"))
 async def cb_tr_student(callback: CallbackQuery):
@@ -2855,6 +2992,32 @@ async def handle_trainer_input(message: Message):
                 reply_markup=kb_trainer_menu(), parse_mode="Markdown")
         else:
             await message.reply("❌ Неверный пароль. Попробуйте ещё раз:")
+
+    elif action == "add_student":
+        name     = (message.text or "").strip()
+        chat_id  = state.get("chat_id")
+        msg_id   = state.get("message_id")
+        _trainer_state.pop(uid, None)
+        if not name:
+            await message.reply("❌ Пустое имя. Попробуйте снова через меню.")
+            return
+        if name in USER_COLUMNS:
+            await bot.edit_message_caption(
+                chat_id=chat_id, message_id=msg_id,
+                caption=f"⚠️ Ученик *{name}* уже существует.",
+                reply_markup=InlineKeyboardBuilder().button(
+                    text="◀️ К ученикам", callback_data="tr_students"
+                ).as_markup(),
+                parse_mode="Markdown")
+            return
+        b = InlineKeyboardBuilder()
+        b.button(text=f"✅ Добавить", callback_data=f"tr_adost_{name}")
+        b.button(text="❌ Отмена",    callback_data="tr_students")
+        b.adjust(1)
+        await bot.edit_message_caption(
+            chat_id=chat_id, message_id=msg_id,
+            caption=f"➕ *Добавить ученика*\n\nИмя: *{name}*\n\nПодтвердить?",
+            reply_markup=b.as_markup(), parse_mode="Markdown")
 
     elif action == "broadcast":
         text       = message.text or ""
@@ -4268,6 +4431,7 @@ async def main():
     print("Бот запущен 🚀 v2.0")
     load_all_tids()
     load_last_bookings()
+    load_extra_students()
     load_grades()
     load_week_rows()
     get_grades_sheet()  # создаёт лист Grades если не существует
