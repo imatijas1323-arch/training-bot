@@ -2810,7 +2810,7 @@ async def handle_trainer_input(message: Message):
         if not raw_text:
             await message.reply("❌ Текст не может быть пустым.")
             return
-        parts = re.split(r'\n?---+\n?', raw_text, maxsplit=2)
+        parts = re.split(r'\n?(?:---+|—-)\n?', raw_text, maxsplit=2)
         plan_text = parts[0].strip()
         vol_text  = parts[1].strip() if len(parts) > 1 else ""
         comm_text = parts[2].strip() if len(parts) > 2 else ""
