@@ -207,6 +207,8 @@ _tr_plan_sel:            dict[int, dict]       = {}     # trainer_id → {date_s
 _tr_viewing_prev:        set                   = set()  # trainer_id → просматривает прошлую неделю
 _sub_pending:            dict[int, dict]       = {}     # trainer_id → {name: pending_delta}
 _archived_students:      set                   = set()  # имена в архиве (скрыты из основного списка)
+_trainer_pre_notified:    set[str] = set()  # "дата|время" — уже уведомили тренера перед тренировкой
+_trainer_pre_notify_date: str      = ""     # дата для сброса _trainer_pre_notified в полночь
 BD_TTL = 300                                 # секунд (5 минут)
 
 STATES = [
@@ -367,8 +369,8 @@ def get_user_grade(user_name: str) -> str:
         for row in rows[1:]:
             if row and row[0].strip() == user_name:
                 return row[1].strip() if len(row) > 1 else ""
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"get_user_grade {user_name}: {e}")
     return ""
 
 def get_user_dnf_grade(user_name: str) -> str:
@@ -380,8 +382,8 @@ def get_user_dnf_grade(user_name: str) -> str:
         for row in rows[1:]:
             if row and row[0].strip() == user_name:
                 return row[2].strip() if len(row) > 2 else ""
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"get_user_dnf_grade {user_name}: {e}")
     return ""
 
 def load_grades():
@@ -514,8 +516,8 @@ def delete_student(name: str) -> tuple[bool, str]:
                 if r and r[0].strip() == name:
                     gc_ws.delete_rows(i + 1)
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"delete_student GradeCurrent {name}: {e}")
         # Кэши
         USER_COLUMNS.pop(name, None)
         _archived_students.discard(name)
@@ -2408,6 +2410,78 @@ async def cb_tr_setdnf(callback: CallbackQuery):
     try: await callback.answer(f"✅ {display}")
     except: pass
 
+def _build_pre_notify_message(date_str: str, d: dict) -> tuple[str, InlineKeyboardMarkup]:
+    """Строит текст и клавиатуру уведомления тренера перед тренировкой."""
+    pool_students   = [p for p in d["participants"] if not p["remote"]]
+    remote_students = [p for p in d["participants"] if p["remote"]]
+    lines = [f"⏰ *Тренировка через ~10 мин* — {d['day_short']} {date_str[:5]} в {d['time']}\n"]
+    if pool_students:
+        lines.append(f"🏊 *С тренером* ({len(pool_students)}):")
+        for p in pool_students:
+            lines.append(f"• {p['name']}")
+    if remote_students:
+        lines.append(f"\n🏠 *Удалённо* ({len(remote_students)}):")
+        for p in remote_students:
+            lines.append(f"• {p['name']}")
+    b = InlineKeyboardBuilder()
+    for p in pool_students + remote_students:
+        b.button(text=p["name"], callback_data=f"tr_pp_{p['name']}_{date_str}")
+    b.adjust(3)
+    return "\n".join(lines), b.as_markup()
+
+@dp.callback_query(F.data.startswith("tr_pp_back_"))
+async def cb_tr_pp_back(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    date_str = callback.data[len("tr_pp_back_"):]
+    _ensure_bd()
+    week_data = tr_get_training_week_data()
+    d = week_data.get(date_str)
+    if not d:
+        try: await callback.answer("Данные не найдены", show_alert=True)
+        except: pass
+        return
+    text, markup = _build_pre_notify_message(date_str, d)
+    try:
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+    except Exception:
+        pass
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data.startswith("tr_pp_"))
+async def cb_tr_pp(callback: CallbackQuery):
+    """Показывает план ученика из уведомления за 10 мин до тренировки."""
+    if not is_trainer(callback.from_user.id): return
+    raw = callback.data[len("tr_pp_"):]
+    # формат: ИМЯ_ДД.ММ.ГГГГ  (имена не содержат '_', дата содержит '.')
+    parts = raw.split("_", 1)
+    if len(parts) != 2:
+        try: await callback.answer()
+        except: pass
+        return
+    name, date_str = parts[0], parts[1]
+    _ensure_bd()
+    trains = get_schedule_for_user(name)
+    t = next((x for x in trains if x["date"] == date_str), None)
+    if not t:
+        try: await callback.answer("Данные не найдены", show_alert=True)
+        except: pass
+        return
+    plan_text   = t["plan"].strip()   or "—"
+    volume_text = t["volume"].strip() or ""
+    remote_tag  = " 🏠" if t["remote"] else ""
+    text = f"📋 *{name}{remote_tag}* — {t['day']} {date_str[:5]}\n\n*План:*\n{plan_text}"
+    if volume_text:
+        text += f"\n\n*Объём:* {volume_text}"
+    b = InlineKeyboardBuilder()
+    b.button(text="◀️ Назад", callback_data=f"tr_pp_back_{date_str}")
+    try:
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=b.as_markup())
+    except Exception:
+        pass
+    try: await callback.answer()
+    except: pass
+
 @dp.callback_query(F.data.startswith("tr_results_"))
 async def cb_tr_results(callback: CallbackQuery):
     if not is_trainer(callback.from_user.id): return
@@ -2429,8 +2503,8 @@ async def cb_tr_results(callback: CallbackQuery):
                 try:
                     state_row = rows_src["bron"] + 4
                     state_val = get_source_sheet().acell(f"{USER_COLUMNS[name]}{state_row}").value or ""
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"cb_tr_results acell {name} row{state_row}: {e}")
             if state_val and state_val != "-":
                 lines.append(f"• {date}: {state_val}")
     text = (f"📊 *Состояния — {name}:*\n\n" + "\n".join(lines[-10:])) if lines \
@@ -3268,8 +3342,8 @@ async def handle_trainer_input(message: Message):
             try:
                 await notify_user(name, f"📢 *Сообщение от тренера:*\n\n{text}", parse_mode="Markdown")
                 sent += 1
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"broadcast notify_user {name}: {e}")
         await message.reply(f"✅ Отправлено {sent}/{len(recipients)} ученикам")
 
     elif action == "set_time":
@@ -4471,7 +4545,8 @@ async def training_reminder():
                                 f"{t['day']}, {t['date']}",
                                 reply_markup=rb.as_markup(),
                             )
-                    except Exception:
+                    except Exception as e:
+                        print(f"training_reminder send {user_name}: {e}")
                         continue
         except Exception as e:
             print(f"training_reminder ошибка: {e}")
@@ -4545,34 +4620,89 @@ async def state_checker():
             for user_name in USER_COLUMNS:
                 trains = get_schedule_for_user(user_name)
                 for t in trains:
-                    if not t["booked"] or not t["time"] or not _is_today(t["date"], now):
+                    if not t["booked"] or not _is_today(t["date"], now):
                         continue
                     key = f"{user_name}|{t['date']}"
                     if key in _state_notified:
                         continue
                     try:
-                        h, m = map(int, t["time"].split(":"))
-                        train_dt  = now.replace(hour=h, minute=m, second=0, microsecond=0)
-                        delta_min = (now - train_dt).total_seconds() / 60
-                        if 115 <= delta_min <= 140:
-                            _state_notified.add(key)
-                            tid = _tid_cache.get(user_name)
-                            if not tid:
-                                continue
-                            b = InlineKeyboardBuilder()
-                            for idx, state in enumerate(STATES[1:], 1):
-                                b.button(text=state, callback_data=f"state_{t['date']}_{idx}")
-                            b.adjust(1)
-                            await bot.send_message(
-                                tid,
-                                f"🏊 {user_name}, как прошла тренировка {t['date']} в {t['time']}?\n\n"
-                                f"Оцени своё состояние:",
-                                reply_markup=b.as_markup(),
-                            )
-                    except Exception:
+                        if t["time"]:
+                            h, m = map(int, t["time"].split(":"))
+                            train_dt  = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                            delta_min = (now - train_dt).total_seconds() / 60
+                            should_notify = 115 <= delta_min <= 140
+                            time_label = f" в {t['time']}"
+                        else:
+                            # удалённая тренировка без времени — спрашиваем в 22:00
+                            should_notify = now.hour == 22 and now.minute < 25
+                            time_label = ""
+                        if not should_notify:
+                            continue
+                        _state_notified.add(key)
+                        tid = _tid_cache.get(user_name)
+                        if not tid:
+                            continue
+                        b = InlineKeyboardBuilder()
+                        for idx, state in enumerate(STATES[1:], 1):
+                            b.button(text=state, callback_data=f"state_{t['date']}_{idx}")
+                        b.adjust(1)
+                        await bot.send_message(
+                            tid,
+                            f"🏊 {user_name}, как прошла тренировка {t['date']}{time_label}?\n\n"
+                            f"Оцени своё состояние:",
+                            reply_markup=b.as_markup(),
+                        )
+                    except Exception as e:
+                        print(f"state_checker send {user_name}: {e}")
                         continue
         except Exception as e:
             print(f"state_checker ошибка: {e}")
+
+async def trainer_pre_notify():
+    """За ~10 минут до тренировки отправляет тренеру список записавшихся."""
+    global _trainer_pre_notified, _trainer_pre_notify_date
+    while True:
+        await asyncio.sleep(60)
+        try:
+            now = _now()
+            today_str = now.strftime("%d.%m.%Y")
+
+            if today_str != _trainer_pre_notify_date:
+                _trainer_pre_notified = set()
+                _trainer_pre_notify_date = today_str
+
+            _ensure_bd()
+            if not _bd_rows or not _bd_rows[0]:
+                continue
+
+            week_data = tr_get_training_week_data()
+            for date_str, d in week_data.items():
+                if not _is_today(date_str, now):
+                    continue
+                if d["is_no_train"] or not d["time"]:
+                    continue
+                if not d["participants"]:
+                    continue
+
+                key = f"{date_str}|{d['time']}"
+                if key in _trainer_pre_notified:
+                    continue
+
+                try:
+                    h, m = map(int, d["time"].split(":"))
+                    train_dt  = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                    delta_min = (train_dt - now).total_seconds() / 60
+                except Exception:
+                    continue
+
+                if not (8 <= delta_min <= 12):
+                    continue
+
+                _trainer_pre_notified.add(key)
+                text, markup = _build_pre_notify_message(date_str, d)
+                await bot.send_message(TRAINER_ID, text, parse_mode="Markdown", reply_markup=markup)
+        except Exception as e:
+            print(f"trainer_pre_notify ошибка: {e}")
 
 async def grade_checker():
     """Каждые 5 минут проверяет изменение грейдов в листе GradeCurrent."""
@@ -4683,6 +4813,7 @@ async def main():
     asyncio.create_task(training_reminder())
     asyncio.create_task(plan_checker())
     asyncio.create_task(state_checker())
+    asyncio.create_task(trainer_pre_notify())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
