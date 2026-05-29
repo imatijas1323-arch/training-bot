@@ -209,6 +209,8 @@ _sub_pending:            dict[int, dict]       = {}     # trainer_id → {name: 
 _archived_students:      set                   = set()  # имена в архиве (скрыты из основного списка)
 _trainer_pre_notified:    set[str] = set()  # "дата|время" — уже уведомили тренера перед тренировкой
 _trainer_pre_notify_date: str      = ""     # дата для сброса _trainer_pre_notified в полночь
+_plan_reminder_notified:  set[str] = set()  # "дата|22" / "дата|14" — уже уведомили тренера о плане
+_plan_reminder_date:      str      = ""     # дата для сброса _plan_reminder_notified в полночь
 BD_TTL = 300                                 # секунд (5 минут)
 
 STATES = [
@@ -4704,6 +4706,70 @@ async def trainer_pre_notify():
         except Exception as e:
             print(f"trainer_pre_notify ошибка: {e}")
 
+async def trainer_plan_reminder():
+    """Уведомляет тренера если план не написан: накануне в 22:00 и в день тренировки в 14:00."""
+    global _plan_reminder_notified, _plan_reminder_date
+    while True:
+        await asyncio.sleep(60)
+        try:
+            now = _now()
+            today_str = now.strftime("%d.%m.%Y")
+
+            if today_str != _plan_reminder_date:
+                _plan_reminder_notified = set()
+                _plan_reminder_date = today_str
+
+            is_22 = now.hour == 22 and now.minute < 5
+            is_14 = now.hour == 14 and now.minute < 5
+            if not is_22 and not is_14:
+                continue
+
+            _ensure_bd()
+            if not _bd_rows or not _bd_rows[0]:
+                continue
+
+            from datetime import timedelta
+            week_data     = tr_get_training_week_data()
+            today_date    = now.date()
+            tomorrow_date = today_date + timedelta(days=1)
+
+            for date_str, d in week_data.items():
+                if d["is_no_train"] or not d["participants"]:
+                    continue
+
+                no_plan = [p["name"] for p in d["participants"] if not p["plan"].strip()]
+                if not no_plan:
+                    continue
+
+                train_date = _parse_sheet_date(date_str, now.year)
+                if not train_date:
+                    continue
+
+                if is_22 and train_date == tomorrow_date:
+                    key = f"{date_str}|22"
+                elif is_14 and train_date == today_date:
+                    key = f"{date_str}|14"
+                else:
+                    continue
+
+                if key in _plan_reminder_notified:
+                    continue
+                _plan_reminder_notified.add(key)
+
+                names_str = ", ".join(no_plan)
+                time_str  = f" в {d['time']}" if d["time"] else ""
+
+                if is_22:
+                    text = (f"📋 Завтра тренировка {date_str}{time_str} — план не написан.\n"
+                            f"Записаны: {names_str}")
+                else:
+                    text = (f"📋 Сегодня тренировка {date_str}{time_str} — план не написан!\n"
+                            f"Записаны: {names_str}")
+
+                await bot.send_message(TRAINER_ID, text)
+        except Exception as e:
+            print(f"trainer_plan_reminder ошибка: {e}")
+
 async def grade_checker():
     """Каждые 5 минут проверяет изменение грейдов в листе GradeCurrent."""
     while True:
@@ -4814,6 +4880,7 @@ async def main():
     asyncio.create_task(plan_checker())
     asyncio.create_task(state_checker())
     asyncio.create_task(trainer_pre_notify())
+    asyncio.create_task(trainer_plan_reminder())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
