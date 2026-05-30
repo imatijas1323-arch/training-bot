@@ -136,7 +136,17 @@ scope = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-creds = Credentials.from_service_account_file("credentials.json", scopes=scope)
+def _resolve_credentials_path() -> str:
+    import os
+    for candidate in ("/data/credentials.json", "credentials.json"):
+        if os.path.exists(candidate):
+            return candidate
+    raise FileNotFoundError(
+        "credentials.json not found. On Amvera upload it to persistence volume /data; "
+        "locally keep it next to main.py."
+    )
+
+creds = Credentials.from_service_account_file(_resolve_credentials_path(), scopes=scope)
 gc    = gspread.authorize(creds)
 ss    = gc.open_by_key(SPREADSHEET_ID)
 
