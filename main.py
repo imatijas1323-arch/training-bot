@@ -4,9 +4,11 @@ bot.py — Swimming Training Bot
 
 import asyncio
 import html
+import logging
 import os
 import re
 import time
+import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -20,6 +22,13 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logging.getLogger("aiogram").setLevel(logging.INFO)
+logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 
 # ═══════════════════════════════════════════════════════════════
 # НАСТРОЙКИ
@@ -4873,8 +4882,27 @@ async def week_watcher():
         except Exception as e:
             print(f"week_watcher ошибка: {e}")
 
+async def heartbeat():
+    while True:
+        try:
+            print(f"alive {_now().strftime('%Y-%m-%d %H:%M:%S')}")
+        except Exception as e:
+            print(f"heartbeat ошибка: {e}")
+        await asyncio.sleep(120)
+
+def _loop_exception_handler(loop, context):
+    msg = context.get("exception") or context.get("message")
+    exc = context.get("exception")
+    print(f"⚠️  asyncio loop exception: {msg}")
+    if exc:
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+    src = context.get("future") or context.get("task") or context.get("handle")
+    if src is not None:
+        print(f"   source: {src!r}")
+
 async def main():
     print("Бот запущен 🚀 v2.0")
+    asyncio.get_running_loop().set_exception_handler(_loop_exception_handler)
     load_all_tids()
     load_last_bookings()
     load_extra_students()
@@ -4882,6 +4910,7 @@ async def main():
     load_grades()
     load_week_rows()
     get_grades_sheet()  # создаёт лист Grades если не существует
+    asyncio.create_task(heartbeat())
     asyncio.create_task(week_watcher())
     asyncio.create_task(grade_checker())
     asyncio.create_task(weekly_report())
