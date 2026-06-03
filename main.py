@@ -1091,6 +1091,11 @@ def _fmt_sub(val) -> str:
     except Exception:
         return str(val)
 
+def _fmt_delta(val) -> str:
+    """1 → '+1', -1 → '−1' (со знаком)"""
+    s = _fmt_sub(abs(float(val)))
+    return f"+{s}" if float(val) >= 0 else f"−{s}"
+
 def tr_get_subscription(user_name: str) -> float:
     try:
         col = _sub_col(user_name)
@@ -1693,16 +1698,17 @@ def kb_trainer_dnf_grades(name: str):
 
 def kb_trainer_sub(name: str, pending: float = 0):
     b = InlineKeyboardBuilder()
+    b.button(text="−1", callback_data=f"tr_subdelta_{name}_-1")
     for delta in (1, 5, 10):
         b.button(text=f"+{delta}", callback_data=f"tr_subdelta_{name}_{delta}")
     if pending:
-        b.button(text=f"✅ Сохранить (+{_fmt_sub(pending)})", callback_data=f"tr_subconfirm_{name}")
+        b.button(text=f"✅ Сохранить ({_fmt_delta(pending)})", callback_data=f"tr_subconfirm_{name}")
         b.button(text="↩️ Сбросить", callback_data=f"tr_subcancel_{name}")
         b.button(text="◀️ Назад", callback_data=f"tr_student_{name}")
-        b.adjust(3, 1, 1, 1)
+        b.adjust(4, 1, 1, 1)
     else:
         b.button(text="◀️ Назад", callback_data=f"tr_student_{name}")
-        b.adjust(3, 1)
+        b.adjust(4, 1)
     return b.as_markup()
 
 def kb_trainer_broadcast():
@@ -2312,7 +2318,7 @@ async def cb_tr_sub(callback: CallbackQuery):
     pending = _sub_pending.get(callback.from_user.id, {}).get(name, 0.0)
     caption = f"🎫 *Абонемент — {name}*\n\nОстаток: *{_fmt_sub(current)}* тренировок"
     if pending:
-        caption += f"\nДобавляем: *+{_fmt_sub(pending)}* → будет *{_fmt_sub(current + pending)}*"
+        caption += f"\nИзменение: *{_fmt_delta(pending)}* → будет *{_fmt_sub(current + pending)}*"
     await callback.message.edit_caption(
         caption=caption, reply_markup=kb_trainer_sub(name, pending), parse_mode="Markdown")
     try: await callback.answer()
@@ -2332,10 +2338,10 @@ async def cb_tr_subdelta(callback: CallbackQuery):
     current = tr_get_subscription(name)
     caption = (f"🎫 *Абонемент — {name}*\n\n"
                f"Остаток: *{_fmt_sub(current)}* тренировок\n"
-               f"Добавляем: *+{_fmt_sub(pending)}* → будет *{_fmt_sub(current + pending)}*")
+               f"Изменение: *{_fmt_delta(pending)}* → будет *{_fmt_sub(current + pending)}*")
     await callback.message.edit_caption(
         caption=caption, reply_markup=kb_trainer_sub(name, pending), parse_mode="Markdown")
-    try: await callback.answer(f"+{delta}")
+    try: await callback.answer(_fmt_delta(delta))
     except: pass
 
 @dp.callback_query(F.data.startswith("tr_subconfirm_"))
@@ -2350,10 +2356,15 @@ async def cb_tr_subconfirm(callback: CallbackQuery):
     current = tr_get_subscription(name)
     caption = f"🎫 *Абонемент — {name}*\n\nОстаток: *{_fmt_sub(current)}* тренировок"
     if ok:
-        caption += f"\n\n✅ Добавлено +{_fmt_sub(pending)}"
-        await notify_user(name,
-            f"🎫 {name}, ваш абонемент пополнен на {_fmt_sub(pending)} тренировок!\n"
-            f"Остаток: *{_fmt_sub(current)}* тренировок.")
+        caption += f"\n\n✅ Изменено {_fmt_delta(pending)}"
+        if pending >= 0:
+            await notify_user(name,
+                f"🎫 {name}, ваш абонемент пополнен на {_fmt_sub(pending)} тренировок!\n"
+                f"Остаток: *{_fmt_sub(current)}* тренировок.")
+        else:
+            await notify_user(name,
+                f"🎫 {name}, с вашего абонемента списано {_fmt_sub(abs(pending))} тренировок.\n"
+                f"Остаток: *{_fmt_sub(current)}* тренировок.")
     await callback.message.edit_caption(
         caption=caption, reply_markup=kb_trainer_sub(name), parse_mode="Markdown")
     try: await callback.answer("✅ Сохранено" if ok else "Нечего сохранять")
