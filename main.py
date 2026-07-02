@@ -215,6 +215,9 @@ _reminder_date:       str            = ""    # дата последней пр�
 _known_plans:         dict[str, str] = {}    # "имя|дата" → план (для уведомления о новом плане)
 _state_notified:      set[str]       = set() # "имя|дата" — кому уже отправили запрос о состоянии
 _state_date:          str            = ""    # дата для сброса _state_notified в полночь
+_remote_bookings:     dict[str, str] = {}    # "имя|дата" → booked_on "DD.MM.YYYY" — источник правды по удалённым записям
+_remote_morning_sent: set[str]       = set() # "имя|дата" — кому уже отправили утреннее напоминание об удалёнке
+_remote_morning_date: str            = ""    # дата для сброса _remote_morning_sent в полночь
 _multi_select:        dict[int, dict[str, str]] = {}  # telegram_id → {date: "pool"|"remote"|"pending"}
 _known_grades:        dict[str, str]            = {}  # имя → текущий грейд плавания
 _known_dnf_grades:    dict[str, str]            = {}  # имя → текущий DNF/DYN грейд
@@ -462,6 +465,48 @@ def load_last_bookings():
                     _last_booking[row[0]] = val
     except Exception as e:
         print(f"load_last_bookings ошибка: {e}")
+
+def load_remote_bookings():
+    """Загружает удалённые записи из Meta (строки ['remote', имя, дата, booked_on])."""
+    try:
+        rows = get_meta_sheet().get_all_values()
+        for row in rows:
+            if len(row) >= 3 and row[0] == "remote":
+                name = row[1].strip()
+                date = row[2].strip()
+                booked_on = row[3].strip() if len(row) >= 4 else ""
+                if name and date:
+                    _remote_bookings[f"{name}|{date}"] = booked_on
+    except Exception as e:
+        print(f"load_remote_bookings ошибка: {e}")
+
+def save_remote_booking(name: str, date: str, booked_on: str):
+    """Помечает запись как удалённую в Meta и в кэше. booked_on — дата создания брони (для утреннего напоминания)."""
+    _remote_bookings[f"{name}|{date}"] = booked_on
+    try:
+        meta = get_meta_sheet()
+        rows = meta.get_all_values()
+        for i, row in enumerate(rows):
+            if len(row) >= 3 and row[0] == "remote" and row[1].strip() == name and row[2].strip() == date:
+                meta.update(f"D{i + 1}", [[booked_on]])
+                return
+        meta.append_row(["remote", name, date, booked_on])
+    except Exception as e:
+        print(f"save_remote_booking({name}, {date}) ошибка: {e}")
+
+def remove_remote_booking(name: str, date: str):
+    """Убирает удалённую запись из Meta и кэша (при отмене брони)."""
+    if _remote_bookings.pop(f"{name}|{date}", None) is None:
+        return
+    try:
+        ws = get_meta_sheet()
+        rows = ws.get_all_values()
+        for i, row in enumerate(rows):
+            if len(row) >= 3 and row[0] == "remote" and row[1].strip() == name and row[2].strip() == date:
+                ws.delete_rows(i + 1)
+                return
+    except Exception as e:
+        print(f"remove_remote_booking({name}, {date}) ошибка: {e}")
 
 def load_extra_students():
     """Загружает учеников добавленных через бот (строки ['student', name, col] в Meta)."""
@@ -807,7 +852,12 @@ def sync_bd():
             volume  = "" if volume  in ("nan", "None") else volume
             comment = "" if comment in ("nan", "None") else comment
 
-            remote = is_remote_day or "удал" in plan.lower() or "удал" in comment.lower()
+            remote = (
+                is_remote_day
+                or f"{user}|{date_str}" in _remote_bookings
+                or "удал" in plan.lower()
+                or "удал" in comment.lower()
+            )
 
             records.append([
                 user,
@@ -1434,6 +1484,37 @@ def set_remote_booking_comment(user_name: str, date_str: str) -> bool:
     except Exception as e:
         print(f"set_remote_booking_comment({user_name}, {date_str}) ошибка: {e}")
         return False
+
+def reconcile_remote_markers():
+    """Гарантирует наличие маркера 'удалённо' в ячейке комментария удалённых записей текущей недели.
+
+    Формула остатка абонемента возвращает списание по тексту '*удал*' в колонке ученика.
+    Когда тренер пишет свой комментарий (напр. «возьми лопатки»), он затирает маркер —
+    здесь бот дописывает 'удалённо' обратно к тексту тренера, не теряя его.
+    """
+    if not _bd_rows or len(_bd_rows) < 2:
+        return
+    fixed = 0
+    for user_name in USER_COLUMNS:
+        for t in get_schedule_for_user(user_name):
+            key = f"{user_name}|{t['date']}"
+            if key not in _remote_bookings or not t["booked"]:
+                continue
+            comment = (t["comments"] or "").strip()
+            if "удал" in comment.lower():
+                continue
+            new_comment = f"удалённо, {comment}" if comment else "удалённо"
+            rows = find_date_rows(t["date"])
+            if not rows:
+                continue
+            try:
+                comment_row = rows["vol"] + 1
+                get_source_sheet().update(f"{USER_COLUMNS[user_name]}{comment_row}", [[new_comment]])
+                fixed += 1
+            except Exception as e:
+                print(f"reconcile_remote_markers {key}: {e}")
+    if fixed:
+        _invalidate_bd()
 
 def cancel_booking(user_name: str, date_str: str) -> bool:
     """Снимает чекбокс бронирования и очищает комментарий пользователя."""
@@ -3738,6 +3819,7 @@ async def cb_book_selected(callback: CallbackQuery):
         if book_type == "remote":
             ok = set_remote_booking_comment(user_name, date_str)
             if ok:
+                save_remote_booking(user_name, date_str, _now().strftime("%d.%m.%Y"))
                 await notify_trainer(f"🏠 {user_name} записался удалённо — {date_str}")
         else:
             ok = set_booking(user_name, date_str, True)
@@ -3843,6 +3925,7 @@ async def cb_book_remote(callback: CallbackQuery):
 
     ok = set_remote_booking_comment(user_name, date_str)
     if ok:
+        save_remote_booking(user_name, date_str, _now().strftime("%d.%m.%Y"))
         _invalidate_bd()
         await callback.message.edit_caption(caption=
             f"🏠 Вы записались на удалённую тренировку {date_str}!\n"
@@ -4060,6 +4143,7 @@ async def cb_to_remote(callback: CallbackQuery):
 
     ok = set_remote_booking_comment(user_name, date_str)
     if ok:
+        save_remote_booking(user_name, date_str, _now().strftime("%d.%m.%Y"))
         _invalidate_bd()
         await callback.message.edit_caption(
             caption=f"🏠 Тренировка {date_str} переведена на удалёнку.",
@@ -4138,6 +4222,7 @@ async def cb_unbook(callback: CallbackQuery):
     ok = cancel_booking(user_name, date_str)
 
     if ok:
+        remove_remote_booking(user_name, date_str)
         _invalidate_bd()
         await callback.message.edit_caption(caption=
             f"✅ Запись на {date_str} отменена.",
@@ -4628,6 +4713,9 @@ async def plan_checker():
                                 f"{t['day']} {t['date']}",
                                 reply_markup=pb.as_markup(),
                             )
+
+            # Восстанавливаем маркер 'удалённо' если тренер затёр его своим комментарием
+            reconcile_remote_markers()
         except Exception as e:
             print(f"plan_checker ошибка: {e}")
 
@@ -4689,6 +4777,54 @@ async def state_checker():
                         continue
         except Exception as e:
             print(f"state_checker ошибка: {e}")
+
+async def remote_morning_reminder():
+    """В 10:00 напоминает об удалённой тренировке — только если запись сделана заранее (не день-в-день)."""
+    global _remote_morning_sent, _remote_morning_date
+    while True:
+        await asyncio.sleep(60)
+        try:
+            now = _now()
+            today_str = now.strftime("%d.%m.%Y")
+
+            if today_str != _remote_morning_date:
+                _remote_morning_sent = set()
+                _remote_morning_date = today_str
+
+            if not (now.hour == 10 and now.minute < 30):
+                continue
+
+            _ensure_bd()
+            if not _bd_rows or not _bd_rows[0]:
+                continue
+
+            for user_name in USER_COLUMNS:
+                for t in get_schedule_for_user(user_name):
+                    if not t["booked"] or not _is_today(t["date"], now):
+                        continue
+                    key = f"{user_name}|{t['date']}"
+                    booked_on = _remote_bookings.get(key)
+                    if booked_on is None:
+                        continue                       # не удалённая запись
+                    if booked_on == today_str:
+                        continue                       # записался день-в-день — не напоминаем
+                    if key in _remote_morning_sent:
+                        continue
+                    _remote_morning_sent.add(key)
+                    tid = _tid_cache.get(user_name)
+                    if not tid:
+                        continue
+                    rb = InlineKeyboardBuilder()
+                    rb.button(text="📋 Посмотреть план тренировки", callback_data=f"view_plan_{t['date']}")
+                    await bot.send_message(
+                        tid,
+                        f"☀️ Привет, {user_name}!\n\n"
+                        f"У вас сегодня удалённая тренировка 🏠\n"
+                        f"Вот ваш план — можно открыть 👇",
+                        reply_markup=rb.as_markup(),
+                    )
+        except Exception as e:
+            print(f"remote_morning_reminder ошибка: {e}")
 
 async def trainer_pre_notify():
     """За ~10 минут до тренировки отправляет тренеру список записавшихся."""
@@ -4918,6 +5054,7 @@ async def main():
     load_last_bookings()
     load_extra_students()
     load_archived_students()
+    load_remote_bookings()
     load_grades()
     load_week_rows()
     get_grades_sheet()  # создаёт лист Grades если не существует
@@ -4929,6 +5066,7 @@ async def main():
     asyncio.create_task(training_reminder())
     asyncio.create_task(plan_checker())
     asyncio.create_task(state_checker())
+    asyncio.create_task(remote_morning_reminder())
     asyncio.create_task(trainer_pre_notify())
     asyncio.create_task(trainer_plan_reminder())
     await dp.start_polling(bot)
