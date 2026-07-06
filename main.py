@@ -1572,7 +1572,7 @@ def kb_remote_time(date_str: str, current: str = "") -> InlineKeyboardMarkup:
         label = f"✅ {tm}" if tm == current else tm
         b.button(text=label, callback_data=f"rtime_{date_str}_{tm}")
     b.button(text="🤷 Пока не знаю / пропустить", callback_data=f"rtime_{date_str}_skip")
-    b.button(text="◀️ Назад", callback_data="rth_back")
+    b.button(text="◀️ Назад", callback_data="schedule")
     b.adjust(4, 4, 3, 1, 1)
     return b.as_markup()
 
@@ -3808,15 +3808,19 @@ async def cb_toggle_day(callback: CallbackQuery):
 
     if date_str in sel:
         del sel[date_str]
-    else:
-        _ensure_bd()
-        trains = get_schedule_for_user(user_name or "")
-        t = next((x for x in trains if x["date"] == date_str), None)
-        if t and (not t["time"] or t["remote"]):
-            sel[date_str] = "remote"   # remote-only день — сразу как удалённо
-        else:
-            sel[date_str] = "pending"  # бассейновый день — показываем выбор типа
+        await cb_schedule(callback)
+        return
 
+    _ensure_bd()
+    trains = get_schedule_for_user(user_name or "")
+    t = next((x for x in trains if x["date"] == date_str), None)
+    if t and (not t["time"] or t["remote"]):
+        # удалённый день — сразу открываем окно времени (оно же завершает запись)
+        await show_remote_time_picker(callback, user_name, date_str)
+        await callback.answer()
+        return
+
+    sel[date_str] = "pending"  # бассейновый день — показываем выбор типа
     await cb_schedule(callback)
 
 # ── Выбор типа тренировки для выбранного дня ────────────────────
@@ -3828,9 +3832,12 @@ async def cb_set_pool(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("set_remote_"))
 async def cb_set_remote(callback: CallbackQuery):
-    date_str = callback.data[11:]
-    _multi_select.setdefault(callback.from_user.id, {})[date_str] = "remote"
-    await cb_schedule(callback)
+    date_str  = callback.data[11:]
+    user_name = get_user_name_by_telegram_id(callback.from_user.id)
+    # убираем день из мультивыбора и сразу открываем окно времени (оно завершит запись)
+    _multi_select.get(callback.from_user.id, {}).pop(date_str, None)
+    await show_remote_time_picker(callback, user_name, date_str)
+    await callback.answer()
 
 # ── Бронирование всех выбранных дней ────────────────────────────
 @dp.callback_query(F.data == "book_selected")
@@ -3879,12 +3886,11 @@ async def cb_book_selected(callback: CallbackQuery):
             f"• {'🏠' if tp == 'remote' else '🏊'} {d}"
             for d, tp in booked_dates
         )
-        summary = f"Вы записаны на тренировки:\n{lines}"
+        await callback.message.edit_caption(
+            caption=f"Вы записаны на тренировки:\n{lines}",
+            reply_markup=kb_main_menu(),
+        )
         await check_subscription(user_name)
-        if any(tp == "remote" for _, tp in booked_dates):
-            await show_remote_times_hub(callback, user_name, intro=summary)
-        else:
-            await callback.message.edit_caption(caption=summary, reply_markup=kb_main_menu())
     else:
         await callback.message.edit_caption(
             caption="❌ Не удалось записаться. Обратитесь к тренеру.",
@@ -3965,21 +3971,8 @@ async def cb_book_remote(callback: CallbackQuery):
         await callback.answer()
         return
 
-    ok = set_remote_booking_comment(user_name, date_str)
-    if ok:
-        save_remote_booking(user_name, date_str, _now().strftime("%d.%m.%Y"))
-        _invalidate_bd()
-        _last_booking[user_name] = date_str
-        _inactivity_notified.discard(user_name)
-        save_last_booking(user_name, date_str)
-        await notify_trainer(f"🏠 {user_name} записался удалённо — {date_str}")
-        await check_subscription(user_name)
-        await show_remote_times_hub(
-            callback, user_name,
-            intro=f"🏠 Вы записались на удалённую тренировку {date_str}!",
-        )
-    else:
-        await callback.message.edit_caption(caption="❌ Не удалось записаться. Обратитесь к тренеру.")
+    # открываем окно времени — оно оформит запись при выборе
+    await show_remote_time_picker(callback, user_name, date_str)
     await callback.answer()
 
 # ── Бронирование в бассейн ───────────────────────────────────────
@@ -4014,95 +4007,68 @@ async def cb_book(callback: CallbackQuery):
     await callback.answer()
 
 # ── Время удалённой тренировки (примерное) ──────────────────────
-async def show_remote_times_hub(callback: CallbackQuery, user_name: str, intro: str = ""):
-    """Экран со списком удалённых записей пользователя — тап по дате открывает пикер времени."""
-    _ensure_bd()
-    now    = _now()
-    trains = get_schedule_for_user(user_name)
-    remote = []
-    for t in trains:
-        key = f"{user_name}|{t['date']}"
-        if key not in _remote_bookings or not t["booked"]:
-            continue
-        if _is_finished(t["date"], _eff_time(user_name, t)):
-            continue
-        remote.append(t)
-    remote.sort(key=lambda x: _parse_sheet_date(x["date"], now.year) or now.date())
-
-    b = InlineKeyboardBuilder()
-    if remote:
-        text = (intro + "\n\n") if intro else ""
-        text += (
-            "🕒 Укажите примерное время, во сколько пойдёте на удалённую тренировку.\n"
-            "От него зависят напоминания вам и тренеру.\n\nНажмите на дату:"
-        )
-        for t in remote:
-            key   = f"{user_name}|{t['date']}"
-            tm    = _remote_times.get(key, "")
-            short = DAY_SHORT.get(t["day"], t["day"])
-            lbl   = f"🏠 {short} {t['date'][:5]} — {tm if tm else 'указать время'}"
-            b.button(text=lbl, callback_data=f"rth_pick_{t['date']}")
-        b.button(text="✅ Готово", callback_data="main_menu")
-        b.adjust(1)
-    else:
-        text = intro or "Готово."
-        b.button(text="◀️ Главное меню", callback_data="main_menu")
-        b.adjust(1)
-
-    try:
-        await callback.message.edit_caption(caption=text, reply_markup=b.as_markup())
-    except TelegramBadRequest:
-        pass
-
 async def show_remote_time_picker(callback: CallbackQuery, user_name: str, date_str: str):
+    """Окно выбора примерного времени удалённой тренировки. Запись оформляется при выборе времени."""
     key     = f"{user_name}|{date_str}"
     current = _remote_times.get(key, "")
     trains  = get_schedule_for_user(user_name)
     t       = next((x for x in trains if x["date"] == date_str), None)
     day     = t["day"] if t else ""
     text = (
-        f"🕒 *{day} {date_str}* — удалённая тренировка\n\n"
+        f"🏠 *{day} {date_str}* — удалённая тренировка\n\n"
         f"Во сколько планируете тренироваться?\n"
-        f"Это примерное время — по нему придут напоминания."
+        f"Это примерное время — по нему придут напоминания.\n"
+        f"Выбор времени завершает запись."
     )
     await callback.message.edit_caption(
         caption=text, parse_mode="Markdown", reply_markup=kb_remote_time(date_str, current),
     )
 
-@dp.callback_query(F.data.startswith("rth_pick_"))
-async def cb_rth_pick(callback: CallbackQuery):
-    date_str  = callback.data[len("rth_pick_"):]
-    user_name = get_user_name_by_telegram_id(callback.from_user.id)
-    if not user_name:
-        await callback.answer()
-        return
-    await show_remote_time_picker(callback, user_name, date_str)
-    await callback.answer()
-
-@dp.callback_query(F.data == "rth_back")
-async def cb_rth_back(callback: CallbackQuery):
-    user_name = get_user_name_by_telegram_id(callback.from_user.id)
-    if not user_name:
-        await callback.answer()
-        return
-    await show_remote_times_hub(callback, user_name)
-    await callback.answer()
-
 @dp.callback_query(F.data.startswith("rtime_"))
 async def cb_rtime(callback: CallbackQuery):
-    payload            = callback.data[len("rtime_"):]
-    date_str, _, val   = payload.rpartition("_")
-    user_name          = get_user_name_by_telegram_id(callback.from_user.id)
+    """Выбор времени в окне удалёнки → оформляет запись (если ещё не записан) и сохраняет время."""
+    payload          = callback.data[len("rtime_"):]
+    date_str, _, val = payload.rpartition("_")
+    user_name        = get_user_name_by_telegram_id(callback.from_user.id)
     if not user_name:
         await callback.answer()
         return
+
+    if _is_past_day(date_str):
+        await cb_schedule(callback, "⛔ Этот день уже прошёл")
+        return
+
+    _ensure_bd()
+    trains  = get_schedule_for_user(user_name)
+    t       = next((x for x in trains if x["date"] == date_str), None)
+    already = bool(t and t["booked"])
+
+    if not already:
+        ok = set_remote_booking_comment(user_name, date_str)
+        if not ok:
+            await callback.message.edit_caption(
+                caption="❌ Не удалось записаться. Обратитесь к тренеру.",
+                reply_markup=kb_main_menu(),
+            )
+            await callback.answer()
+            return
+        save_remote_booking(user_name, date_str, _now().strftime("%d.%m.%Y"))
+
     if val != "skip":
         save_remote_time(user_name, date_str, val)
-        toast = f"✅ Время {val} сохранено"
-    else:
-        toast = "Пропущено — напомним утром"
-    await show_remote_times_hub(callback, user_name)
-    await callback.answer(toast)
+
+    _invalidate_bd()
+
+    if not already:
+        _last_booking[user_name] = date_str
+        _inactivity_notified.discard(user_name)
+        save_last_booking(user_name, date_str)
+        _multi_select.get(callback.from_user.id, {}).pop(date_str, None)
+        await notify_trainer(f"🏠 {user_name} записался удалённо — {date_str}")
+        await check_subscription(user_name)
+
+    time_note = f" на {val}" if val != "skip" else ""
+    await cb_schedule(callback, f"🏠 Записаны удалённо{time_note} — {date_str}")
 
 # ── Мои записи ──────────────────────────────────────────────────
 @dp.callback_query(F.data == "my_booking")
@@ -4278,10 +4244,8 @@ async def cb_to_remote(callback: CallbackQuery):
         save_remote_booking(user_name, date_str, _now().strftime("%d.%m.%Y"))
         _invalidate_bd()
         await notify_trainer(f"🏠 {user_name} перешёл на удалённую тренировку — {date_str}")
-        await show_remote_times_hub(
-            callback, user_name,
-            intro=f"🏠 Тренировка {date_str} переведена на удалёнку.",
-        )
+        # запись уже оформлена — окно только предложит указать время
+        await show_remote_time_picker(callback, user_name, date_str)
     else:
         await callback.message.edit_caption(caption="❌ Не удалось изменить. Обратитесь к тренеру.")
     await callback.answer()
