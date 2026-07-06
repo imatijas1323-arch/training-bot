@@ -4017,23 +4017,14 @@ async def show_remote_time_picker(callback: CallbackQuery, user_name: str, date_
     text = (
         f"🏠 *{day} {date_str}* — удалённая тренировка\n\n"
         f"Во сколько планируете тренироваться?\n"
-        f"Это примерное время — по нему придут напоминания.\n"
-        f"Выбор времени завершает запись."
+        f"Это примерное время — по нему придут напоминания."
     )
     await callback.message.edit_caption(
         caption=text, parse_mode="Markdown", reply_markup=kb_remote_time(date_str, current),
     )
 
-@dp.callback_query(F.data.startswith("rtime_"))
-async def cb_rtime(callback: CallbackQuery):
-    """Выбор времени в окне удалёнки → оформляет запись (если ещё не записан) и сохраняет время."""
-    payload          = callback.data[len("rtime_"):]
-    date_str, _, val = payload.rpartition("_")
-    user_name        = get_user_name_by_telegram_id(callback.from_user.id)
-    if not user_name:
-        await callback.answer()
-        return
-
+async def _finalize_remote_booking(callback: CallbackQuery, user_name: str, date_str: str, time_val: str):
+    """Оформляет удалённую запись (если ещё не записан) и сохраняет время. Сам отвечает на callback."""
     if _is_past_day(date_str):
         await cb_schedule(callback, "⛔ Этот день уже прошёл")
         return
@@ -4054,8 +4045,8 @@ async def cb_rtime(callback: CallbackQuery):
             return
         save_remote_booking(user_name, date_str, _now().strftime("%d.%m.%Y"))
 
-    if val != "skip":
-        save_remote_time(user_name, date_str, val)
+    if time_val:
+        save_remote_time(user_name, date_str, time_val)
 
     _invalidate_bd()
 
@@ -4067,8 +4058,60 @@ async def cb_rtime(callback: CallbackQuery):
         await notify_trainer(f"🏠 {user_name} записался удалённо — {date_str}")
         await check_subscription(user_name)
 
-    time_note = f" на {val}" if val != "skip" else ""
+    time_note = f" на {time_val}" if time_val else ""
     await cb_schedule(callback, f"🏠 Записаны удалённо{time_note} — {date_str}")
+
+@dp.callback_query(F.data.startswith("rtime_"))
+async def cb_rtime(callback: CallbackQuery):
+    """Выбор времени → экран подтверждения. «Пропустить» — сразу запись без времени."""
+    payload          = callback.data[len("rtime_"):]
+    date_str, _, val = payload.rpartition("_")
+    user_name        = get_user_name_by_telegram_id(callback.from_user.id)
+    if not user_name:
+        await callback.answer()
+        return
+
+    if val == "skip":
+        await _finalize_remote_booking(callback, user_name, date_str, "")
+        return
+
+    _ensure_bd()
+    trains = get_schedule_for_user(user_name)
+    t      = next((x for x in trains if x["date"] == date_str), None)
+    day    = t["day"] if t else ""
+    text = (
+        f"🏠 *{day} {date_str}* — удалённо\n\n"
+        f"🕒 Время: *{val}*\n\n"
+        f"Подтвердить запись?"
+    )
+    b = InlineKeyboardBuilder()
+    b.button(text=f"✅ Подтвердить {val}", callback_data=f"rtconfirm_{date_str}_{val}")
+    b.button(text="◀️ Изменить время",     callback_data=f"rtpick_{date_str}")
+    b.adjust(1)
+    await callback.message.edit_caption(caption=text, parse_mode="Markdown", reply_markup=b.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("rtconfirm_"))
+async def cb_rtconfirm(callback: CallbackQuery):
+    """Подтверждение выбранного времени → оформляет запись."""
+    payload          = callback.data[len("rtconfirm_"):]
+    date_str, _, val = payload.rpartition("_")
+    user_name        = get_user_name_by_telegram_id(callback.from_user.id)
+    if not user_name:
+        await callback.answer()
+        return
+    await _finalize_remote_booking(callback, user_name, date_str, val)
+
+@dp.callback_query(F.data.startswith("rtpick_"))
+async def cb_rtpick(callback: CallbackQuery):
+    """Вернуться к выбору времени (кнопка «Изменить время»)."""
+    date_str  = callback.data[len("rtpick_"):]
+    user_name = get_user_name_by_telegram_id(callback.from_user.id)
+    if not user_name:
+        await callback.answer()
+        return
+    await show_remote_time_picker(callback, user_name, date_str)
+    await callback.answer()
 
 # ── Мои записи ──────────────────────────────────────────────────
 @dp.callback_query(F.data == "my_booking")
