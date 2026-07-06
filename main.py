@@ -775,8 +775,18 @@ def get_schedule_for_user(user_name: str) -> list[dict]:
 
 
 def _eff_time(user_name: str, t: dict) -> str:
-    """Время тренировки для напоминаний: личное время удалёнки (если указано), иначе время дня из расписания."""
+    """Время тренировки для напоминаний: личный интервал удалёнки (если указан), иначе время дня из расписания."""
     return _remote_times.get(f"{user_name}|{t['date']}", "") or (t.get("time") or "")
+
+def _remote_anchor(eff: str) -> str:
+    """HH:MM для расчёта напоминаний: интервал → его начало; готовое HH:MM (в т.ч. старые записи) → как есть."""
+    if not eff:
+        return ""
+    if eff in _INTERVAL_START:
+        return _INTERVAL_START[eff]
+    if re.match(r"^\d{1,2}:\d{2}$", eff):
+        return eff
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1559,21 +1569,27 @@ def cancel_booking(user_name: str, date_str: str) -> bool:
 # КЛАВИАТУРЫ
 # ═══════════════════════════════════════════════════════════════
 
+# Интервалы примерного времени удалёнки: (подпись, «якорь» HH:MM = начало интервала для расчёта напоминаний)
 _REMOTE_TIME_OPTIONS = [
-    "07:00", "08:00", "09:00", "10:00",
-    "12:00", "14:00", "16:00", "18:00",
-    "19:00", "20:00", "21:00",
+    ("6-10",  "06:00"),
+    ("10-12", "10:00"),
+    ("12-14", "12:00"),
+    ("14-16", "14:00"),
+    ("16-18", "16:00"),
+    ("18-20", "18:00"),
+    ("20-24", "20:00"),
 ]
+_INTERVAL_START = dict(_REMOTE_TIME_OPTIONS)  # "14-16" → "14:00"
 
 def kb_remote_time(date_str: str, current: str = "") -> InlineKeyboardMarkup:
-    """Пикер примерного времени удалённой тренировки."""
+    """Пикер примерного интервала времени удалённой тренировки."""
     b = InlineKeyboardBuilder()
-    for tm in _REMOTE_TIME_OPTIONS:
-        label = f"✅ {tm}" if tm == current else tm
-        b.button(text=label, callback_data=f"rtime_{date_str}_{tm}")
+    for label, _start in _REMOTE_TIME_OPTIONS:
+        text = f"✅ {label}" if label == current else label
+        b.button(text=text, callback_data=f"rtime_{date_str}_{label}")
     b.button(text="🤷 Пока не знаю / пропустить", callback_data=f"rtime_{date_str}_skip")
     b.button(text="◀️ Назад", callback_data="schedule")
-    b.adjust(4, 4, 3, 1, 1)
+    b.adjust(2, 2, 2, 1, 1, 1)
     return b.as_markup()
 
 def kb_start():
@@ -4016,8 +4032,8 @@ async def show_remote_time_picker(callback: CallbackQuery, user_name: str, date_
     day     = t["day"] if t else ""
     text = (
         f"🏠 *{day} {date_str}* — удалённая тренировка\n\n"
-        f"Во сколько планируете тренироваться?\n"
-        f"Это примерное время — по нему придут напоминания."
+        f"В каком интервале планируете тренироваться?\n"
+        f"Это ориентир — по нему придут напоминания."
     )
     await callback.message.edit_caption(
         caption=text, parse_mode="Markdown", reply_markup=kb_remote_time(date_str, current),
@@ -4081,12 +4097,12 @@ async def cb_rtime(callback: CallbackQuery):
     day    = t["day"] if t else ""
     text = (
         f"🏠 *{day} {date_str}* — удалённо\n\n"
-        f"🕒 Время: *{val}*\n\n"
+        f"🕒 Интервал: *{val}*\n\n"
         f"Подтвердить запись?"
     )
     b = InlineKeyboardBuilder()
     b.button(text=f"✅ Подтвердить {val}", callback_data=f"rtconfirm_{date_str}_{val}")
-    b.button(text="◀️ Изменить время",     callback_data=f"rtpick_{date_str}")
+    b.button(text="◀️ Изменить интервал",  callback_data=f"rtpick_{date_str}")
     b.adjust(1)
     await callback.message.edit_caption(caption=text, parse_mode="Markdown", reply_markup=b.as_markup())
     await callback.answer()
@@ -4780,14 +4796,15 @@ async def training_reminder():
                 for t in trains:
                     if not t["booked"] or not _is_today(t["date"], now):
                         continue
-                    eff = _eff_time(user_name, t)
-                    if not eff:
+                    eff    = _eff_time(user_name, t)
+                    anchor = _remote_anchor(eff)
+                    if not anchor:
                         continue
                     key = f"{user_name}|{t['date']}"
                     if key in _reminded_training:
                         continue
                     try:
-                        h, m = map(int, eff.split(":"))
+                        h, m = map(int, anchor.split(":"))
                         train_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
                         delta_min = (train_dt - now).total_seconds() / 60
                         if 110 <= delta_min <= 130:
@@ -4890,13 +4907,14 @@ async def state_checker():
                     if key in _state_notified:
                         continue
                     try:
-                        eff = _eff_time(user_name, t)
-                        if eff:
-                            h, m = map(int, eff.split(":"))
+                        eff    = _eff_time(user_name, t)
+                        anchor = _remote_anchor(eff)
+                        if anchor:
+                            h, m = map(int, anchor.split(":"))
                             train_dt  = now.replace(hour=h, minute=m, second=0, microsecond=0)
                             delta_min = (now - train_dt).total_seconds() / 60
                             should_notify = 115 <= delta_min <= 140
-                            time_label = f" в {eff}"
+                            time_label = f" ({eff})"
                         else:
                             # удалённая тренировка без указанного времени — спрашиваем в 22:00
                             should_notify = now.hour == 22 and now.minute < 25
@@ -5095,13 +5113,14 @@ async def trainer_plan_reminder():
                     if t["plan"].strip():
                         continue  # план написан — напоминать не нужно
 
-                    eff   = _eff_time(user_name, t)   # личное время (или время дня)
-                    slots = []
+                    eff    = _eff_time(user_name, t)          # интервал (или время дня)
+                    anchor = _remote_anchor(eff)              # HH:MM для расчёта (начало интервала)
+                    slots  = []
                     if now.hour == 10 and now.minute < 5:
                         slots.append(("10", "к 10:00"))
-                    if eff:
+                    if anchor:
                         try:
-                            h, m = map(int, eff.split(":"))
+                            h, m = map(int, anchor.split(":"))
                             train_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
                             delta = (train_dt - now).total_seconds() / 60
                         except Exception:
@@ -5117,7 +5136,7 @@ async def trainer_plan_reminder():
                         if dkey in _plan_reminder_notified:
                             continue
                         _plan_reminder_notified.add(dkey)
-                        ttxt = f" (примерно в {eff})" if eff else ""
+                        ttxt = f" (интервал {eff})" if eff else ""
                         await bot.send_message(
                             TRAINER_ID,
                             f"📋 Удалёнка сегодня {t['date']}{ttxt} — план для {user_name} "
