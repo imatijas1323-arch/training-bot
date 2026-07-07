@@ -219,6 +219,8 @@ _remote_bookings:     dict[str, str] = {}    # "имя|дата" → booked_on "
 _remote_times:        dict[str, str] = {}    # "имя|дата" → "HH:MM" — личное время удалённой тренировки (для напоминаний)
 _remote_morning_sent: set[str]       = set() # "имя|дата" — кому уже отправили утреннее напоминание об удалёнке
 _remote_morning_date: str            = ""    # дата для сброса _remote_morning_sent в полночь
+_remote_early_sent:   set[str]       = set() # "stud|имя|дата" / "trainer|имя|дата" — накануне вечером о раннем интервале
+_remote_early_date:   str            = ""    # дата для сброса _remote_early_sent в полночь
 _multi_select:        dict[int, dict[str, str]] = {}  # telegram_id → {date: "pool"|"remote"|"pending"}
 _known_grades:        dict[str, str]            = {}  # имя → текущий грейд плавания
 _known_dnf_grades:    dict[str, str]            = {}  # имя → текущий DNF/DYN грейд
@@ -787,6 +789,16 @@ def _remote_anchor(eff: str) -> str:
     if re.match(r"^\d{1,2}:\d{2}$", eff):
         return eff
     return ""
+
+def _is_early_interval(eff: str) -> bool:
+    """True для раннего интервала (начало раньше 8:00) — напоминания шлём накануне вечером, а не ночью в день тренировки."""
+    anchor = _remote_anchor(eff)
+    if not anchor:
+        return False
+    try:
+        return int(anchor.split(":")[0]) < 8
+    except Exception:
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -4801,6 +4813,8 @@ async def training_reminder():
                     if not anchor:
                         continue
                     key = f"{user_name}|{t['date']}"
+                    if key in _remote_bookings and _is_early_interval(eff):
+                        continue  # ранний интервал — напоминаем накануне (remote_early_reminder)
                     if key in _reminded_training:
                         continue
                     try:
@@ -4971,6 +4985,8 @@ async def remote_morning_reminder():
                         continue                       # не удалённая запись
                     if booked_on == today_str:
                         continue                       # записался день-в-день — не напоминаем
+                    if _is_early_interval(_eff_time(user_name, t)):
+                        continue                       # ранний интервал (6-10) — уже напомнили накануне вечером
                     if key in _remote_morning_sent:
                         continue
                     _remote_morning_sent.add(key)
@@ -4988,6 +5004,72 @@ async def remote_morning_reminder():
                     )
         except Exception as e:
             print(f"remote_morning_reminder ошибка: {e}")
+
+async def remote_early_reminder():
+    """Накануне вечером (20:00) напоминает об удалёнке с ранним интервалом (6-10) — ученику и тренеру.
+
+    Для раннего интервала расчёт «за 2ч/4ч» в день тренировки попадал бы на ночь,
+    а утреннее напоминание в 10:00 — уже после тренировки. Поэтому шлём накануне.
+    """
+    global _remote_early_sent, _remote_early_date
+    while True:
+        await asyncio.sleep(60)
+        try:
+            from datetime import timedelta
+            now       = _now()
+            today_str = now.strftime("%d.%m.%Y")
+
+            if today_str != _remote_early_date:
+                _remote_early_sent = set()
+                _remote_early_date = today_str
+
+            if not (now.hour == 20 and now.minute < 5):
+                continue
+
+            _ensure_bd()
+            if not _bd_rows or not _bd_rows[0]:
+                continue
+
+            tomorrow = now.date() + timedelta(days=1)
+
+            for user_name in USER_COLUMNS:
+                for t in get_schedule_for_user(user_name):
+                    key = f"{user_name}|{t['date']}"
+                    if key not in _remote_bookings or not t["booked"]:
+                        continue
+                    eff = _eff_time(user_name, t)
+                    if not _is_early_interval(eff):
+                        continue
+                    if _parse_sheet_date(t["date"], now.year) != tomorrow:
+                        continue
+
+                    # ученику — напоминание о ранней тренировке завтра
+                    skey = f"stud|{key}"
+                    if skey not in _remote_early_sent:
+                        _remote_early_sent.add(skey)
+                        tid = _tid_cache.get(user_name)
+                        if tid:
+                            rb = InlineKeyboardBuilder()
+                            rb.button(text="📋 Посмотреть план тренировки", callback_data=f"view_plan_{t['date']}")
+                            await bot.send_message(
+                                tid,
+                                f"🌙 {user_name}, напоминание!\n\n"
+                                f"Завтра утром удалённая тренировка 🏠 (интервал {eff})\n"
+                                f"{t['day']}, {t['date']}",
+                                reply_markup=rb.as_markup(),
+                            )
+
+                    # тренеру — только если план ещё не написан
+                    tkey = f"trainer|{key}"
+                    if tkey not in _remote_early_sent and not t["plan"].strip():
+                        _remote_early_sent.add(tkey)
+                        await bot.send_message(
+                            TRAINER_ID,
+                            f"📋 Завтра утром удалёнка {t['date']} (интервал {eff}) — "
+                            f"план для {user_name} не написан!",
+                        )
+        except Exception as e:
+            print(f"remote_early_reminder ошибка: {e}")
 
 async def trainer_pre_notify():
     """За ~10 минут до тренировки отправляет тренеру список записавшихся."""
@@ -5114,6 +5196,8 @@ async def trainer_plan_reminder():
                         continue  # план написан — напоминать не нужно
 
                     eff    = _eff_time(user_name, t)          # интервал (или время дня)
+                    if _is_early_interval(eff):
+                        continue  # ранний интервал — тренеру напоминаем накануне (remote_early_reminder)
                     anchor = _remote_anchor(eff)              # HH:MM для расчёта (начало интервала)
                     slots  = []
                     if now.hour == 10 and now.minute < 5:
@@ -5276,6 +5360,7 @@ async def main():
     asyncio.create_task(plan_checker())
     asyncio.create_task(state_checker())
     asyncio.create_task(remote_morning_reminder())
+    asyncio.create_task(remote_early_reminder())
     asyncio.create_task(trainer_pre_notify())
     asyncio.create_task(trainer_plan_reminder())
     await dp.start_polling(bot)
