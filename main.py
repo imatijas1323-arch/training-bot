@@ -786,7 +786,14 @@ def _remote_anchor(eff: str) -> str:
         return ""
     if eff in _INTERVAL_START:
         return _INTERVAL_START[eff]
-    if re.match(r"^\d{1,2}:\d{2}$", eff):
+    if "-" in eff:                                   # интервал вида "HH:MM-..." или старый "6-10"
+        start = eff.split("-")[0].strip()
+        if re.match(r"^\d{1,2}:\d{2}$", start):
+            return start
+        if re.match(r"^\d{1,2}$", start):
+            return f"{int(start):02d}:00"
+        return ""
+    if re.match(r"^\d{1,2}:\d{2}$", eff):            # старые записи одним временем
         return eff
     return ""
 
@@ -1583,15 +1590,15 @@ def cancel_booking(user_name: str, date_str: str) -> bool:
 
 # Интервалы примерного времени удалёнки: (подпись, «якорь» HH:MM = начало интервала для расчёта напоминаний)
 _REMOTE_TIME_OPTIONS = [
-    ("6-10",  "06:00"),
-    ("10-12", "10:00"),
-    ("12-14", "12:00"),
-    ("14-16", "14:00"),
-    ("16-18", "16:00"),
-    ("18-20", "18:00"),
-    ("20-24", "20:00"),
+    ("06:00-10:00", "06:00"),
+    ("10:00-12:00", "10:00"),
+    ("12:00-14:00", "12:00"),
+    ("14:00-16:00", "14:00"),
+    ("16:00-18:00", "16:00"),
+    ("18:00-20:00", "18:00"),
+    ("20:00-24:00", "20:00"),
 ]
-_INTERVAL_START = dict(_REMOTE_TIME_OPTIONS)  # "14-16" → "14:00"
+_INTERVAL_START = dict(_REMOTE_TIME_OPTIONS)  # "14:00-16:00" → "14:00"
 
 def kb_remote_time(date_str: str, current: str = "") -> InlineKeyboardMarkup:
     """Пикер примерного интервала времени удалённой тренировки."""
