@@ -234,6 +234,8 @@ _sub_pending:            dict[int, dict]       = {}     # trainer_id → {name: 
 _archived_students:      set                   = set()  # имена в архиве (скрыты из основного списка)
 _trainer_pre_notified:    set[str] = set()  # "дата|время" — уже уведомили тренера перед тренировкой
 _trainer_pre_notify_date: str      = ""     # дата для сброса _trainer_pre_notified в полночь
+_student_pre_notified:    set[str] = set()  # "имя|дата" — уже отправили ученику план за 10 мин
+_student_pre_notify_date: str      = ""     # дата для сброса _student_pre_notified в полночь
 _plan_reminder_notified:  set[str] = set()  # "дата|22" / "дата|14" — уже уведомили тренера о плане
 _plan_reminder_date:      str      = ""     # дата для сброса _plan_reminder_notified в полночь
 BD_TTL = 300                                 # секунд (5 минут)
@@ -779,6 +781,11 @@ def get_schedule_for_user(user_name: str) -> list[dict]:
 def _eff_time(user_name: str, t: dict) -> str:
     """Время тренировки для напоминаний: личный интервал удалёнки (если указан), иначе время дня из расписания."""
     return _remote_times.get(f"{user_name}|{t['date']}", "") or (t.get("time") or "")
+
+def _sched_time(user_name: str, date_str: str) -> str:
+    """Время дня из расписания — для текста уведомлений."""
+    t = next((x for x in get_schedule_for_user(user_name) if x["date"] == date_str), None)
+    return (t.get("time") or "").strip() if t else ""
 
 def _remote_anchor(eff: str) -> str:
     """HH:MM для расчёта напоминаний: интервал → его начало; готовое HH:MM (в т.ч. старые записи) → как есть."""
@@ -2611,7 +2618,8 @@ def _build_pre_notify_message(date_str: str, d: dict) -> tuple[str, InlineKeyboa
     if remote_students:
         lines.append(f"\n🏠 *Удалённо* ({len(remote_students)}):")
         for p in remote_students:
-            lines.append(f"• {p['name']}")
+            rt = _remote_times.get(f"{p['name']}|{date_str}", "")
+            lines.append(f"• {p['name']}" + (f" — 🕒 {rt}" if rt else ""))
     b = InlineKeyboardBuilder()
     for p in pool_students + remote_students:
         b.button(text=p["name"], callback_data=f"tr_pp_{p['name']}_{date_str}")
@@ -4025,6 +4033,9 @@ async def cb_book(callback: CallbackQuery):
         await callback.answer()
         return
 
+    _ensure_bd()
+    day_time = _sched_time(user_name, date_str)
+
     ok = set_booking(user_name, date_str, True)
     if ok:
         _invalidate_bd()
@@ -4035,7 +4046,8 @@ async def cb_book(callback: CallbackQuery):
         _last_booking[user_name] = date_str
         _inactivity_notified.discard(user_name)
         save_last_booking(user_name, date_str)
-        await notify_trainer(f"🏊 {user_name} забронировал тренировку — {date_str}")
+        time_note = f" в {day_time}" if day_time else ""
+        await notify_trainer(f"🏊 {user_name} забронировал тренировку — {date_str}{time_note}")
         await check_subscription(user_name)
     else:
         await callback.message.edit_caption(caption="❌ Не удалось записаться. Обратитесь к тренеру.")
@@ -4080,6 +4092,7 @@ async def _finalize_remote_booking(callback: CallbackQuery, user_name: str, date
             return
         save_remote_booking(user_name, date_str, _now().strftime("%d.%m.%Y"))
 
+    prev_time = _remote_times.get(f"{user_name}|{date_str}", "")
     if time_val:
         save_remote_time(user_name, date_str, time_val)
 
@@ -4090,8 +4103,11 @@ async def _finalize_remote_booking(callback: CallbackQuery, user_name: str, date
         _inactivity_notified.discard(user_name)
         save_last_booking(user_name, date_str)
         _multi_select.get(callback.from_user.id, {}).pop(date_str, None)
-        await notify_trainer(f"🏠 {user_name} записался удалённо — {date_str}")
+        interval = f" — 🕒 {time_val}" if time_val else " — 🕒 время не указано"
+        await notify_trainer(f"🏠 {user_name} записался удалённо — {date_str}{interval}")
         await check_subscription(user_name)
+    elif time_val and time_val != prev_time:
+        await notify_trainer(f"🕒 {user_name} указал время удалёнки — {date_str}, {time_val}")
 
     time_note = f" на {time_val}" if time_val else ""
     await cb_schedule(callback, f"🏠 Записаны удалённо{time_note} — {date_str}")
@@ -5124,6 +5140,67 @@ async def trainer_pre_notify():
         except Exception as e:
             print(f"trainer_pre_notify ошибка: {e}")
 
+async def student_pre_notify():
+    """За ~10 минут до тренировки отправляет ученику напоминание вместе с планом."""
+    global _student_pre_notified, _student_pre_notify_date
+    while True:
+        await asyncio.sleep(60)
+        try:
+            now = _now()
+            today_str = now.strftime("%d.%m.%Y")
+
+            if today_str != _student_pre_notify_date:
+                _student_pre_notified = set()
+                _student_pre_notify_date = today_str
+
+            _ensure_bd()
+            if not _bd_rows or not _bd_rows[0]:
+                continue
+
+            for user_name in USER_COLUMNS:
+                for t in get_schedule_for_user(user_name):
+                    if not t["booked"] or not _is_today(t["date"], now):
+                        continue
+                    key = f"{user_name}|{t['date']}"
+                    if key in _student_pre_notified:
+                        continue
+                    eff       = _eff_time(user_name, t)
+                    anchor    = _remote_anchor(eff)
+                    if not anchor:
+                        continue
+                    is_remote = key in _remote_bookings
+                    if is_remote and _is_early_interval(eff):
+                        continue  # ранний интервал — напоминаем накануне вечером
+                    try:
+                        h, m      = map(int, anchor.split(":"))
+                        train_dt  = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                        delta_min = (train_dt - now).total_seconds() / 60
+                    except Exception:
+                        continue
+                    if not (8 <= delta_min <= 12):
+                        continue
+
+                    _student_pre_notified.add(key)
+                    tid = _tid_cache.get(user_name)
+                    if not tid:
+                        continue
+
+                    icon = "🏠" if is_remote else "🏊"
+                    plan = t["plan"].strip()
+                    body = f"📋 *План:*\n{plan}" if plan else "📋 План пока не написан."
+                    try:
+                        await bot.send_message(
+                            tid,
+                            f"⏰ {user_name}, тренировка через ~10 минут!\n"
+                            f"{icon} {t['day']}, {t['date']} в {eff}\n\n"
+                            f"{body}",
+                            parse_mode="Markdown",
+                        )
+                    except Exception as e:
+                        print(f"student_pre_notify send {user_name}: {e}")
+        except Exception as e:
+            print(f"student_pre_notify ошибка: {e}")
+
 async def trainer_plan_reminder():
     """Уведомляет тренера если план не написан.
 
@@ -5369,6 +5446,7 @@ async def main():
     asyncio.create_task(remote_morning_reminder())
     asyncio.create_task(remote_early_reminder())
     asyncio.create_task(trainer_pre_notify())
+    asyncio.create_task(student_pre_notify())
     asyncio.create_task(trainer_plan_reminder())
     await dp.start_polling(bot)
 
