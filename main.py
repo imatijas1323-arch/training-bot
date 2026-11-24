@@ -2318,13 +2318,26 @@ async def _delete_later(chat_id: int, message_ids: list[int], delay: float):
         try: await bot.delete_message(chat_id, mid)
         except Exception: pass
 
-async def _ask_poster_bind(chat, thread_id: int | None):
+def _poster_topic(message: Message) -> tuple[int | None, str]:
+    """Тема группы, где отправлена команда: (thread_id, подпись для тренера).
+
+    В группе с темами сообщение из темы несёт message_thread_id, а в ответ —
+    служебное «тема создана» с её названием. В общем чате (General) темы нет.
+    """
+    is_forum = bool(getattr(message.chat, "is_forum", False))
+    thread_id = message.message_thread_id if (message.is_topic_message or is_forum) else None
+    if not thread_id:
+        return None, "общий чат группы" if is_forum else ""
+    created = getattr(message.reply_to_message, "forum_topic_created", None)
+    return thread_id, (f"тема «{created.name}»" if created else f"тема #{thread_id}")
+
+async def _ask_poster_bind(chat, thread_id: int | None, topic_label: str = ""):
     """Автор команды неизвестен (канал, анонимный админ) — просим тренера подтвердить в личке."""
     b = InlineKeyboardBuilder()
     b.button(text="✅ Привязать", callback_data=f"poster_bind_{chat.id}_{thread_id or 0}")
     b.button(text="❌ Нет",       callback_data="poster_bind_no")
     b.adjust(2)
-    where = f"«{chat.title}»" + (" — в ветку, где отправлена команда" if thread_id else "")
+    where = f"«{chat.title}»" + (f", {topic_label}" if topic_label else "")
     await bot.send_message(TRAINER_ID, f"🖼 Публиковать постеры расписания в {where}?",
                            reply_markup=b.as_markup())
 
@@ -2348,17 +2361,18 @@ async def cmd_poster_here(message: Message):
             f"и отправьте там /poster_here@{username or 'имя_бота'} — "
             "в канале просто постом, в группе с темами — внутри ветки «Расписание».")
         return
-    thread_id = message.message_thread_id if message.is_topic_message else None
+    thread_id, topic_label = _poster_topic(message)
     if from_trainer:
         saved = await asyncio.to_thread(save_poster_target, message.chat.id, thread_id)
         note = "" if saved else " (не сохранилось в таблицу — до перезапуска бота)"
-        reply = await message.reply(f"✅ Постеры расписания будут публиковаться сюда{note}")
+        where = f" — {topic_label}" if topic_label else ""
+        reply = await message.reply(f"✅ Постеры расписания будут публиковаться сюда{where}{note}")
         asyncio.create_task(_delete_later(message.chat.id, [message.message_id, reply.message_id], 10))
     elif message.sender_chat:
         # Отправлено анонимно или от имени канала: автор неизвестен, подтверждает тренер
         try: await message.delete()
         except Exception: pass
-        await _ask_poster_bind(message.chat, thread_id)
+        await _ask_poster_bind(message.chat, thread_id, topic_label)
 
 @dp.channel_post(Command("poster_here"))
 async def channel_poster_here(message: Message):

@@ -4,4 +4,4 @@ __pycache__/
 venv/
 *.pyc
 .DS_Store
-poster_demo.png
+poster_*.png
