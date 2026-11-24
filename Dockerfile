@@ -6,6 +6,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY logo.png .
+COPY assets ./assets
+COPY poster.py .
 COPY main.py .
 
 CMD ["python", "-u", "main.py"]

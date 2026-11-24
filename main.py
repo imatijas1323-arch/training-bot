@@ -9,17 +9,18 @@ import os
 import re
 import time
 import traceback
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 from google.auth.transport.requests import AuthorizedSession
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, BufferedInputFile, InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
+from poster import PosterDay, render_schedule_poster, date_range_label
 
 load_dotenv()
 
@@ -39,6 +40,10 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 TRAINER_ID       = int(os.getenv("TRAINER_ID", "0"))
 TRAINER_PASSWORD = os.getenv("TRAINER_PASSWORD", "")
 BOT_TIMEZONE   = os.getenv("BOT_TIMEZONE", "Europe/Moscow")
+# Куда публиковать постер расписания (если не привязано командой /poster_here):
+# id канала/группы (-100…) или @username, и id ветки (темы) для групп с темами.
+SCHEDULE_CHAT_ID  = os.getenv("SCHEDULE_CHAT_ID", "")
+SCHEDULE_TOPIC_ID = os.getenv("SCHEDULE_TOPIC_ID", "")
 BOT_TZ         = ZoneInfo(BOT_TIMEZONE)
 
 USER_COLUMNS = {
@@ -238,6 +243,8 @@ _student_pre_notified:    set[str] = set()  # "имя|дата" — уже от�
 _student_pre_notify_date: str      = ""     # дата для сброса _student_pre_notified в полночь
 _plan_reminder_notified:  set[str] = set()  # "дата|22" / "дата|14" — уже уведомили тренера о плане
 _plan_reminder_date:      str      = ""     # дата для сброса _plan_reminder_notified в полночь
+_poster_target: tuple | None = None          # (chat_id, thread_id|None) — куда публиковать постер расписания
+_poster_last:   dict         = {}            # последний постер: {week_row, chat_id, message_id}
 BD_TTL = 300                                 # секунд (5 минут)
 
 STATES = [
@@ -2172,6 +2179,199 @@ async def cb_tr_confirm_open(callback: CallbackQuery):
         reply_markup=b.as_markup(),
         parse_mode="Markdown")
 
+# ── Постер расписания для TG-канала ─────────────────────────────
+# После «📢 Уведомить учеников» бот рисует постер недели (poster.py)
+# и публикует его в канал / ветку группы. Куда — привязывается командой
+# /poster_here (хранится в Meta: ["poster_target", chat_id, thread_id]),
+# запасной вариант — SCHEDULE_CHAT_ID / SCHEDULE_TOPIC_ID в .env.
+
+_POSTER_DAY_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+def _poster_target_from_env() -> tuple | None:
+    chat = SCHEDULE_CHAT_ID.strip()
+    if not chat:
+        return None
+    chat_id = int(chat) if re.fullmatch(r"-?\d+", chat) else chat
+    topic = SCHEDULE_TOPIC_ID.strip()
+    return chat_id, (int(topic) if topic.isdigit() else None)
+
+def load_poster_target():
+    """Куда публиковать постер: привязка из Meta, иначе .env."""
+    global _poster_target
+    try:
+        for row in get_meta_sheet().get_all_values():
+            if len(row) >= 2 and row[0] == "poster_target" and row[1].strip():
+                thread = row[2].strip() if len(row) > 2 else ""
+                _poster_target = (int(row[1]), int(thread) if thread.isdigit() else None)
+                break
+    except Exception as e:
+        print(f"load_poster_target ошибка: {e}")
+    if _poster_target is None:
+        _poster_target = _poster_target_from_env()
+    print(f"Постер расписания: {_poster_target or 'канал не привязан'}")
+
+def save_poster_target(chat_id: int, thread_id: int | None) -> bool:
+    """Запоминает канал/ветку для постера (в памяти и в Meta)."""
+    global _poster_target
+    _poster_target = (chat_id, thread_id)
+    try:
+        ws = get_meta_sheet()
+        rows = ws.get_all_values()
+        for i in range(len(rows) - 1, -1, -1):
+            if rows[i] and rows[i][0] == "poster_target":
+                ws.delete_rows(i + 1)
+        ws.append_row(["poster_target", str(chat_id), str(thread_id or "")])
+        return True
+    except Exception as e:
+        print(f"save_poster_target ошибка: {e}")
+        return False
+
+def _parse_date_near(date_str: str, today: date) -> date | None:
+    """Дата из таблицы; если год не указан — ближайший к сегодняшнему дню."""
+    d = _parse_sheet_date(date_str, today.year)
+    if d is None or re.search(r"\.\d{4}$", str(date_str).strip()):
+        return d
+    candidates = []
+    for y in (today.year - 1, today.year, today.year + 1):
+        try:
+            candidates.append(d.replace(year=y))
+        except ValueError:      # 29 февраля
+            pass
+    return min(candidates, key=lambda c: abs((c - today).days)) if candidates else d
+
+def _poster_days(week_days: list[dict]) -> list[PosterDay]:
+    """7 дней недели из листа 2026 → дни постера Пн..Вс."""
+    if len(week_days) < 7:
+        raise ValueError(f"в таблице найдено {len(week_days)} дней недели вместо 7")
+    today = _now().date()
+    monday = None
+    for i, d in enumerate(week_days[:7]):
+        parsed = _parse_date_near(d.get("date", ""), today)
+        if parsed:
+            monday = parsed - timedelta(days=i)
+            break
+    if monday is None:
+        raise ValueError("не удалось прочитать даты недели из таблицы")
+    days = []
+    for i, d in enumerate(week_days[:7]):
+        day_date = monday + timedelta(days=i)
+        if d.get("is_no_train"):
+            days.append(PosterDay(day_date))
+        else:
+            days.append(PosterDay(day_date, time=d.get("time", ""), remote=bool(d.get("is_remote"))))
+    return days
+
+def _poster_caption(days: list[PosterDay], bot_username: str) -> str:
+    lines = [f"📅 Расписание на {date_range_label(days)}", ""]
+    for i, day in enumerate(days):
+        if day.has_training:
+            lines.append(f"{_POSTER_DAY_SHORT[i]}, {day.date.day} — {day.time or 'удалённо'}")
+    if bot_username:
+        lines += ["", f"Запись — в боте @{bot_username}"]
+    return "\n".join(lines)
+
+async def _bot_username() -> str:
+    try:
+        return (await bot.me()).username or ""
+    except Exception:
+        return ""
+
+async def publish_schedule_poster() -> tuple[bool, str]:
+    """Рисует постер текущей недели и публикует его в канал.
+    Возвращает (опубликован ли, короткий статус для тренера)."""
+    global _poster_last
+    if _week_marker_row == -1:
+        return False, "нет открытой недели — постер не сделан"
+    _invalidate_bd()
+    days = _poster_days(tr_get_current_week_days())
+    if not any(d.has_training for d in days):
+        return False, "на неделе нет тренировок — постер не публикую"
+    png = await asyncio.to_thread(render_schedule_poster, days)
+    username = await _bot_username()
+    caption = _poster_caption(days, username)
+    photo = BufferedInputFile(png, filename="raspisanie.png")
+
+    if not _poster_target:
+        hint = (f"\n\n⚙️ Чтобы бот публиковал постер сам: добавьте его админом в канал "
+                f"и отправьте там /poster_here@{username or 'имя_бота'} "
+                f"(в группе с темами — внутри ветки «Расписание»).")
+        await bot.send_photo(TRAINER_ID, photo, caption=caption + hint)
+        return False, "канал не привязан — постер прислал вам в личку"
+
+    chat_id, thread_id = _poster_target
+    # Повторное «Уведомить» на той же неделе — обновляем уже опубликованный постер
+    if _poster_last.get("week_row") == _week_marker_row and _poster_last.get("chat_id") == chat_id:
+        try:
+            await bot.edit_message_media(
+                chat_id=chat_id, message_id=_poster_last["message_id"],
+                media=InputMediaPhoto(media=photo, caption=caption))
+            return True, "постер в канале обновлён"
+        except TelegramBadRequest as e:
+            print(f"publish_schedule_poster: не удалось обновить пост ({e}) — публикую заново")
+    msg = await bot.send_photo(chat_id, photo, caption=caption, message_thread_id=thread_id)
+    _poster_last = {"week_row": _week_marker_row, "chat_id": chat_id, "message_id": msg.message_id}
+    return True, "постер опубликован в канале"
+
+async def _delete_later(chat_id: int, message_ids: list[int], delay: float):
+    await asyncio.sleep(delay)
+    for mid in message_ids:
+        try: await bot.delete_message(chat_id, mid)
+        except Exception: pass
+
+@dp.message(Command("poster_here"))
+async def cmd_poster_here(message: Message):
+    """Привязка ветки группы (или подсказка в личке)."""
+    if not message.from_user or not is_trainer(message.from_user.id):
+        return
+    if message.chat.type == "private":
+        if _poster_target:
+            where = f"сейчас привязан чат {_poster_target[0]}" + \
+                    (f", ветка {_poster_target[1]}" if _poster_target[1] else "")
+        else:
+            where = "сейчас канал не привязан"
+        username = await _bot_username()
+        await message.answer(
+            "🖼 После «📢 Уведомить учеников» бот публикует постер расписания в канал.\n"
+            f"{where}.\n\n"
+            "Как привязать: добавьте бота админом с правом публиковать сообщения "
+            f"и отправьте там /poster_here@{username or 'имя_бота'} — "
+            "в канале просто постом, в группе с темами — внутри ветки «Расписание».")
+        return
+    thread_id = message.message_thread_id if message.is_topic_message else None
+    saved = await asyncio.to_thread(save_poster_target, message.chat.id, thread_id)
+    note = "" if saved else " (не сохранилось в таблицу — до перезапуска бота)"
+    reply = await message.reply(f"✅ Постеры расписания будут публиковаться сюда{note}")
+    asyncio.create_task(_delete_later(message.chat.id, [message.message_id, reply.message_id], 10))
+
+@dp.channel_post(Command("poster_here"))
+async def channel_poster_here(message: Message):
+    """Привязка канала: автор поста в канале неизвестен — просим тренера подтвердить."""
+    try: await message.delete()
+    except Exception: pass
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Привязать", callback_data=f"poster_bind_{message.chat.id}")
+    b.button(text="❌ Нет",       callback_data="poster_bind_no")
+    b.adjust(2)
+    await bot.send_message(
+        TRAINER_ID,
+        f"🖼 Публиковать постеры расписания в канал «{message.chat.title}»?",
+        reply_markup=b.as_markup())
+
+@dp.callback_query(F.data.startswith("poster_bind_"))
+async def cb_poster_bind(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    raw = callback.data[len("poster_bind_"):]
+    if not re.fullmatch(r"-?\d+", raw):
+        await callback.message.edit_text("Ок, канал не привязан.")
+        try: await callback.answer()
+        except: pass
+        return
+    saved = await asyncio.to_thread(save_poster_target, int(raw), None)
+    note = "" if saved else "\n⚠️ Не сохранилось в таблицу — привязка до перезапуска бота."
+    await callback.message.edit_text(f"✅ Канал привязан — постеры расписания будут публиковаться туда.{note}")
+    try: await callback.answer()
+    except: pass
+
 @dp.callback_query(F.data == "tr_notify_students")
 async def cb_tr_notify_students(callback: CallbackQuery):
     global _week_session_notified
@@ -2191,8 +2391,15 @@ async def cb_tr_notify_students(callback: CallbackQuery):
             f"📅 {user_name}, расписание на {label} готово!\n"
             f"Открой бот чтобы посмотреть и записаться 👇"
         )
-    try: await callback.answer("📢 Уведомления отправлены!")
-    except: pass
+    try:
+        posted, poster_status = await publish_schedule_poster()
+    except Exception as e:
+        traceback.print_exc()
+        posted, poster_status = False, f"постер не опубликован: {e}"
+    status = f"📢 Уведомления отправлены!\n🖼 {poster_status}"
+    try: await callback.answer(status[:200], show_alert=not posted)
+    except Exception:
+        await notify_trainer(status)
     await cb_tr_schedule(callback)
 
 @dp.callback_query(F.data == "tr_cancel_expand")
@@ -5434,6 +5641,7 @@ async def main():
     load_remote_bookings()
     load_grades()
     load_week_rows()
+    load_poster_target()
     get_grades_sheet()  # создаёт лист Grades если не существует
     asyncio.create_task(heartbeat())
     asyncio.create_task(week_watcher())
