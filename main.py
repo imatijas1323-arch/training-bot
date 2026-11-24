@@ -2318,12 +2318,23 @@ async def _delete_later(chat_id: int, message_ids: list[int], delay: float):
         try: await bot.delete_message(chat_id, mid)
         except Exception: pass
 
+async def _ask_poster_bind(chat, thread_id: int | None):
+    """Автор команды неизвестен (канал, анонимный админ) — просим тренера подтвердить в личке."""
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Привязать", callback_data=f"poster_bind_{chat.id}_{thread_id or 0}")
+    b.button(text="❌ Нет",       callback_data="poster_bind_no")
+    b.adjust(2)
+    where = f"«{chat.title}»" + (" — в ветку, где отправлена команда" if thread_id else "")
+    await bot.send_message(TRAINER_ID, f"🖼 Публиковать постеры расписания в {where}?",
+                           reply_markup=b.as_markup())
+
 @dp.message(Command("poster_here"))
 async def cmd_poster_here(message: Message):
     """Привязка ветки группы (или подсказка в личке)."""
-    if not message.from_user or not is_trainer(message.from_user.id):
-        return
+    from_trainer = bool(message.from_user and is_trainer(message.from_user.id))
     if message.chat.type == "private":
+        if not from_trainer:
+            return
         if _poster_target:
             where = f"сейчас привязан чат {_poster_target[0]}" + \
                     (f", ветка {_poster_target[1]}" if _poster_target[1] else "")
@@ -2338,35 +2349,36 @@ async def cmd_poster_here(message: Message):
             "в канале просто постом, в группе с темами — внутри ветки «Расписание».")
         return
     thread_id = message.message_thread_id if message.is_topic_message else None
-    saved = await asyncio.to_thread(save_poster_target, message.chat.id, thread_id)
-    note = "" if saved else " (не сохранилось в таблицу — до перезапуска бота)"
-    reply = await message.reply(f"✅ Постеры расписания будут публиковаться сюда{note}")
-    asyncio.create_task(_delete_later(message.chat.id, [message.message_id, reply.message_id], 10))
+    if from_trainer:
+        saved = await asyncio.to_thread(save_poster_target, message.chat.id, thread_id)
+        note = "" if saved else " (не сохранилось в таблицу — до перезапуска бота)"
+        reply = await message.reply(f"✅ Постеры расписания будут публиковаться сюда{note}")
+        asyncio.create_task(_delete_later(message.chat.id, [message.message_id, reply.message_id], 10))
+    elif message.sender_chat:
+        # Отправлено анонимно или от имени канала: автор неизвестен, подтверждает тренер
+        try: await message.delete()
+        except Exception: pass
+        await _ask_poster_bind(message.chat, thread_id)
 
 @dp.channel_post(Command("poster_here"))
 async def channel_poster_here(message: Message):
     """Привязка канала: автор поста в канале неизвестен — просим тренера подтвердить."""
     try: await message.delete()
     except Exception: pass
-    b = InlineKeyboardBuilder()
-    b.button(text="✅ Привязать", callback_data=f"poster_bind_{message.chat.id}")
-    b.button(text="❌ Нет",       callback_data="poster_bind_no")
-    b.adjust(2)
-    await bot.send_message(
-        TRAINER_ID,
-        f"🖼 Публиковать постеры расписания в канал «{message.chat.title}»?",
-        reply_markup=b.as_markup())
+    await _ask_poster_bind(message.chat, None)
 
 @dp.callback_query(F.data.startswith("poster_bind_"))
 async def cb_poster_bind(callback: CallbackQuery):
     if not is_trainer(callback.from_user.id): return
     raw = callback.data[len("poster_bind_"):]
-    if not re.fullmatch(r"-?\d+", raw):
+    m = re.fullmatch(r"(-?\d+)(?:_(\d+))?", raw)      # "{chat_id}_{thread_id|0}"
+    if not m:
         await callback.message.edit_text("Ок, канал не привязан.")
         try: await callback.answer()
         except: pass
         return
-    saved = await asyncio.to_thread(save_poster_target, int(raw), None)
+    thread_id = int(m[2]) if m[2] and m[2] != "0" else None
+    saved = await asyncio.to_thread(save_poster_target, int(m[1]), thread_id)
     note = "" if saved else "\n⚠️ Не сохранилось в таблицу — привязка до перезапуска бота."
     await callback.message.edit_text(f"✅ Канал привязан — постеры расписания будут публиковаться туда.{note}")
     try: await callback.answer()
