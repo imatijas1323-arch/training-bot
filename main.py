@@ -2377,6 +2377,29 @@ def _render_poster_caption(tpl: str, days: list[PosterDay], bot_username: str) -
             .replace("{до}", f"{last.day} {MONTHS_RU_GEN[last.month - 1]}")
             .replace("{бот}", _bot_url(bot_username)))
 
+_MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
+
+def _caption_to_editable(caption_html: str) -> str:
+    """HTML подписи → обычный текст для правки: ссылки как [текст](адрес).
+
+    Так ссылки не теряются при копировании — Telegram на части устройств
+    копирует сообщение без вшитых ссылок. Остальная разметка снимается.
+    """
+    text = re.sub(r'<a href="([^"]*)">(.*?)</a>',
+                  lambda m: f"[{m.group(2)}]({html.unescape(m.group(1))})", caption_html, flags=re.S)
+    return html.unescape(re.sub(r"<[^>]+>", "", text))
+
+def _editable_to_html(message: Message) -> str:
+    """Текст от тренера → HTML: вшитые ссылки сохраняются, [текст](адрес) становится ссылкой."""
+    src = (message.html_text or "") if message.text else ""
+    def link(m):
+        url = html.escape(html.unescape(m.group(2)), quote=True)
+        return f'<a href="{url}">{m.group(1)}</a>'
+    return _MD_LINK_RE.sub(link, src).strip()
+
+_LINKS_HINT = ("Ссылки записаны как [текст](адрес) — оставьте их так, в посте это будет "
+               "кликабельный текст. Новую ссылку добавляйте так же.")
+
 def _caption_len(caption_html: str) -> int:
     """Длина подписи так, как её считает Telegram — без HTML-разметки."""
     return len(html.unescape(re.sub(r"<[^>]+>", "", caption_html)))
@@ -2531,11 +2554,11 @@ async def cb_poster_edit(callback: CallbackQuery):
         return
     _trainer_state[callback.from_user.id] = {"action": "poster_caption"}
     await callback.message.answer(
-        "✏️ Пришлите новый текст поста одним сообщением.\n"
-        "Удобно так: скопируйте текст ниже, поправьте и отправьте — ссылки и оформление сохранятся.\n\n"
+        "✏️ Пришлите новый текст поста одним сообщением: скопируйте текст ниже, поправьте и отправьте.\n"
+        f"{_LINKS_HINT}\n\n"
         "Это изменит только этот пост. Постоянный шаблон — /poster_text.",
         reply_markup=_kb_poster_cancel())
-    await callback.message.answer(draft["caption"], parse_mode="HTML",
+    await callback.message.answer(_caption_to_editable(draft["caption"]),
                                   link_preview_options=LinkPreviewOptions(is_disabled=True))
     try: await callback.answer()
     except: pass
@@ -2550,9 +2573,10 @@ async def _start_poster_template_edit(chat_id: int, uid: int):
         "Бот подставит сам:\n"
         "• {до} — последний день недели («24 мая»);\n"
         "• строку с {день}, {время} или {дата} повторит для каждой тренировки "
-        "(«Вторник», «20:00» или «удалённо», «19 мая»).",
+        "(«Вторник», «20:00» или «удалённо», «19 мая»).\n\n"
+        f"{_LINKS_HINT}",
         reply_markup=_kb_poster_cancel())
-    await bot.send_message(chat_id, tpl, parse_mode="HTML",
+    await bot.send_message(chat_id, _caption_to_editable(tpl),
                            link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 @dp.message(Command("poster_text"))
@@ -2580,7 +2604,7 @@ async def cb_poster_text_cancel(callback: CallbackQuery):
 async def handle_poster_text(message: Message, action: str):
     """Текст от тренера: правка подписи черновика или нового шаблона."""
     uid = message.from_user.id
-    new_html = (message.html_text or "").strip() if message.text else ""
+    new_html = _editable_to_html(message)
     if not new_html:
         await message.reply("❌ Нужен текст. Пришлите сообщение с текстом или нажмите «Отмена».")
         return
