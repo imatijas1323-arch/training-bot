@@ -1187,6 +1187,48 @@ def tr_cancel_expand_week() -> bool:
     _pending_open_row = -1
     return True
 
+def tr_repeat_source_row(target_row: int) -> int:
+    """Неделя прямо перед target_row — по группам строк (depth=3), как tr_find_next_week_row.
+
+    Отметке «прошедшая неделя» не доверяем: исторически она бывает не на понедельнике.
+    """
+    try:
+        sheet_id = get_source_sheet().id
+        starts = [g["range"]["startIndex"] for g in get_sheet_row_groups()
+                  if g.get("range", {}).get("sheetId") == sheet_id and g.get("depth", 0) == 3
+                  and g["range"].get("startIndex", 0) < target_row]
+        if starts:
+            return max(starts)
+    except Exception as e:
+        print(f"tr_repeat_source_row группы: {e}")
+    rows = [r for r in (_week_marker_row, _prev_week_row) if r != -1 and r < target_row]
+    return max(rows) if rows else -1
+
+def tr_repeat_week_plan(src_row: int, dst_row: int) -> list[dict]:
+    """Что скопируется: по дню — дата/время в старой неделе и дата в новой."""
+    data = get_source_sheet().get_all_values()
+    def cell(r: int) -> str:
+        return str(data[r][1]).strip() if r < len(data) and len(data[r]) > 1 else ""
+    plan = []
+    for k in range(7):
+        s_time, d_time = src_row + 5 * k + 2, dst_row + 5 * k + 2   # строка «Время» дня (0-based)
+        plan.append({
+            "day":       DAY_SHORT_RU.get(DAY_MAP_SYNC.get(cell(src_row + 5 * k + 1).lower(), ""), ""),
+            "src_date":  cell(s_time + 1),
+            "dst_date":  cell(d_time + 1),
+            "time":      cell(s_time),
+            "dst_cell":  f"B{d_time + 1}",
+        })
+    return plan
+
+def tr_repeat_week(plan: list[dict]) -> int:
+    """Пишет время старой недели в новую одним запросом. Пустые дни не трогает."""
+    updates = [{"range": p["dst_cell"], "values": [[p["time"]]]} for p in plan if p["time"]]
+    if updates:
+        get_source_sheet().batch_update(updates)
+    _invalidate_bd()
+    return len(updates)
+
 def tr_set_time(date_str: str, time_str: str) -> bool:
     rows = find_date_rows(date_str)
     if not rows:
@@ -1712,6 +1754,7 @@ def kb_tr_week_overview(days: list, week_active: bool, preview: bool = False) ->
             else:
                 label = f"⬜ {short} {date[:5]}"
             b.button(text=label, callback_data=f"tr_day_{date}")
+        b.button(text="🔁 Как на прошлой неделе", callback_data="tr_wrepeat")
         b.button(text="✅ Открыть эту неделю",   callback_data="tr_confirm_open")
         b.button(text="❌ Свернуть обратно",      callback_data="tr_cancel_expand")
     elif week_active and _week_collapsed:
@@ -1720,6 +1763,7 @@ def kb_tr_week_overview(days: list, week_active: bool, preview: bool = False) ->
         if _prev_week_row != -1:
             b.button(text="📂 Развернуть прошлую неделю", callback_data="tr_view_prev_week")
         b.button(text="📂 Развернуть следующую неделю",   callback_data="tr_expand_next")
+        b.button(text="🔁 Повторить неделю",               callback_data="tr_wrepeat")
         b.button(text="◀️ Назад",                         callback_data="tr_menu")
     else:
         if week_active:
@@ -1743,6 +1787,7 @@ def kb_tr_week_overview(days: list, week_active: bool, preview: bool = False) ->
             if _prev_week_row != -1:
                 b.button(text="📂 Развернуть прошлую неделю", callback_data="tr_view_prev_week")
         b.button(text="📂 Развернуть следующую неделю", callback_data="tr_expand_next")
+        b.button(text="🔁 Повторить неделю",             callback_data="tr_wrepeat")
         b.button(text="◀️ Назад",                       callback_data="tr_menu")
     b.adjust(1)
     return b.as_markup()
@@ -2682,6 +2727,60 @@ async def cb_tr_notify_students(callback: CallbackQuery):
     try: await callback.answer(status[:200], show_alert=True)
     except Exception:
         await notify_trainer(status)
+    await cb_tr_schedule(callback)
+
+# ── Повторить неделю: время дней с прошлой недели → в новую ─────────
+@dp.callback_query(F.data == "tr_wrepeat")
+async def cb_tr_wrepeat(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    if _pending_open_row == -1 and tr_expand_next_week() == -1:   # следующая неделя ещё не развёрнута
+        try: await callback.answer("❌ Следующая неделя не найдена", show_alert=True)
+        except: pass
+        return
+    src = tr_repeat_source_row(_pending_open_row)
+    if src == -1:
+        try: await callback.answer("❌ Нет прошлой недели, с которой копировать", show_alert=True)
+        except: pass
+        await cb_tr_schedule(callback)
+        return
+    plan = tr_repeat_week_plan(src, _pending_open_row)
+    if not any(p["time"] for p in plan):
+        try: await callback.answer("❌ На прошлой неделе время не задано — копировать нечего", show_alert=True)
+        except: pass
+        await cb_tr_schedule(callback)
+        return
+    lines = [f"{p['day']} {p['dst_date'][:5]} — {p['time'] or 'без изменений'}" for p in plan]
+    caption = (f"🔁 *Повторить неделю*\n"
+               f"{plan[0]['src_date'][:5]}–{plan[-1]['src_date'][:5]} → "
+               f"{plan[0]['dst_date'][:5]}–{plan[-1]['dst_date'][:5]}\n\n"
+               + "\n".join(lines) +
+               "\n\nВремя в новой неделе заменится на это.")
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Повторить", callback_data="tr_wrepeat_do")
+    b.button(text="◀️ Назад",     callback_data="tr_schedule")
+    b.adjust(2)
+    await callback.message.edit_caption(caption=caption, reply_markup=b.as_markup(), parse_mode="Markdown")
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data == "tr_wrepeat_do")
+async def cb_tr_wrepeat_do(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    src = tr_repeat_source_row(_pending_open_row) if _pending_open_row != -1 else -1
+    if src == -1:
+        try: await callback.answer("❌ Неделя для заполнения не развёрнута — начните заново", show_alert=True)
+        except: pass
+        await cb_tr_schedule(callback)
+        return
+    try:
+        n = tr_repeat_week(tr_repeat_week_plan(src, _pending_open_row))
+        text = (f"🔁 Время скопировано ({n} дн.). Проверьте, откройте неделю и нажмите "
+                f"«📢 Уведомить» — постер с новыми датами придёт на проверку.")
+    except Exception as e:
+        traceback.print_exc()
+        text = f"❌ Не удалось скопировать: {e}"
+    try: await callback.answer(text[:200], show_alert=True)
+    except: pass
     await cb_tr_schedule(callback)
 
 @dp.callback_query(F.data == "tr_cancel_expand")
