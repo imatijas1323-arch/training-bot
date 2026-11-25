@@ -16,11 +16,11 @@ import gspread
 from google.oauth2.service_account import Credentials
 from google.auth.transport.requests import AuthorizedSession
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, BufferedInputFile, InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, FSInputFile, BufferedInputFile, InputMediaPhoto, LinkPreviewOptions, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
-from poster import PosterDay, render_schedule_poster, date_range_label
+from poster import PosterDay, render_schedule_poster, MONTHS_RU_GEN
 
 load_dotenv()
 
@@ -245,6 +245,8 @@ _plan_reminder_notified:  set[str] = set()  # "дата|22" / "дата|14" — 
 _plan_reminder_date:      str      = ""     # дата для сброса _plan_reminder_notified в полночь
 _poster_target: tuple | None = None          # (chat_id, thread_id|None) — куда публиковать постер расписания
 _poster_last:   dict         = {}            # последний постер: {week_row, chat_id, message_id}
+_poster_draft:  dict         = {}            # постер на проверке у тренера: {week_row, png, caption, chat_id, preview_msg_id}
+_poster_caption_tpl: str | None = None       # шаблон текста к постеру (HTML) из Meta; None — POSTER_CAPTION_DEFAULT
 BD_TTL = 300                                 # секунд (5 минут)
 
 STATES = [
@@ -1675,7 +1677,8 @@ def kb_trainer_menu():
     b.button(text="🏋️ Тренировки",  callback_data="tr_trainings")
     b.button(text="📊 Статистика",   callback_data="tr_stats")
     b.button(text="📢 Рассылка",     callback_data="tr_broadcast")
-    b.adjust(2, 2, 1)
+    b.button(text="🖼 Постер",       callback_data="tr_poster")
+    b.adjust(2, 2, 2)
     return b.as_markup()
 
 def kb_persistent_trainer():
@@ -2185,7 +2188,34 @@ async def cb_tr_confirm_open(callback: CallbackQuery):
 # /poster_here (хранится в Meta: ["poster_target", chat_id, thread_id]),
 # запасной вариант — SCHEDULE_CHAT_ID / SCHEDULE_TOPIC_ID в .env.
 
-_POSTER_DAY_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+_POSTER_DAY_FULL = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+
+# Шаблон текста к постеру (HTML Telegram). Строка с {день}/{время}/{дата}
+# повторяется для каждой тренировки; {до} — последний день недели («24 мая»);
+# {бот} — ссылка на этого бота. Тренер меняет шаблон в боте (/poster_text).
+POSTER_LINK_QUAL     = "https://t.me/c/1427410903/1/3284"
+POSTER_LINK_QUAL_DNF = ("https://graph.org/Nyryanie-v-dlinu-bez-last-Dynamic-Without-Fins-DNF--"
+                        "Nyryanie-v-dlinu-v-lastah-Dynamic-With-Fins-DYN-12-16")
+POSTER_LINK_TRAINER  = "https://t.me/IgorMes"
+POSTER_CAPTION_DEFAULT = (
+    "Расписание до {до} 🫜🫜🫜\n"
+    "Не забывайте ставить оценки состояния в журнале после тренировки!\n"
+    "\n"
+    "🔹 {день}, {время}, Лужники !\n"
+    "\n"
+    "Беговая активность не требует предварительного бронирования и доступна для всех желающих\n"
+    "\n"
+    '<a href="{бот}">👾Туда и обратно_ ассистент</a> (Для бронирования тренировок)\n'
+    "\n"
+    f'<a href="{POSTER_LINK_QUAL}">⏱️ Квалификация «туда и обратно»</a>\n'
+    "\n"
+    f'<a href="{POSTER_LINK_QUAL_DNF}">⏱️ Квалификация "туда и обратно" DNF/DYN</a>\n'
+    "\n"
+    f'<a href="{POSTER_LINK_TRAINER}">💬 Связаться с тренером</a>\n'
+    "\n"
+    '<a href="{бот}">👾Туда и обратно_ ассистент</a>'
+)
+CAPTION_LIMIT = 1024   # лимит подписи к фото в Telegram (символы без разметки)
 
 def _poster_target_from_env() -> tuple | None:
     chat = SCHEDULE_CHAT_ID.strip()
@@ -2196,14 +2226,15 @@ def _poster_target_from_env() -> tuple | None:
     return chat_id, (int(topic) if topic.isdigit() else None)
 
 def load_poster_target():
-    """Куда публиковать постер: привязка из Meta, иначе .env."""
-    global _poster_target
+    """Куда публиковать постер (Meta, иначе .env) и шаблон текста к нему."""
+    global _poster_target, _poster_caption_tpl
     try:
         for row in get_meta_sheet().get_all_values():
-            if len(row) >= 2 and row[0] == "poster_target" and row[1].strip():
+            if len(row) >= 2 and row[0] == "poster_target" and row[1].strip() and _poster_target is None:
                 thread = row[2].strip() if len(row) > 2 else ""
                 _poster_target = (int(row[1]), int(thread) if thread.isdigit() else None)
-                break
+            elif len(row) >= 2 and row[0] == "poster_caption" and row[1].strip():
+                _poster_caption_tpl = row[1]
     except Exception as e:
         print(f"load_poster_target ошибка: {e}")
     if _poster_target is None:
@@ -2224,6 +2255,22 @@ def save_poster_target(chat_id: int, thread_id: int | None) -> bool:
         return True
     except Exception as e:
         print(f"save_poster_target ошибка: {e}")
+        return False
+
+def save_poster_caption(tpl: str) -> bool:
+    """Сохраняет шаблон текста к постеру (в памяти и в Meta)."""
+    global _poster_caption_tpl
+    _poster_caption_tpl = tpl
+    try:
+        ws = get_meta_sheet()
+        rows = ws.get_all_values()
+        for i in range(len(rows) - 1, -1, -1):
+            if rows[i] and rows[i][0] == "poster_caption":
+                ws.delete_rows(i + 1)
+        ws.append_row(["poster_caption", tpl])
+        return True
+    except Exception as e:
+        print(f"save_poster_caption ошибка: {e}")
         return False
 
 def _parse_date_near(date_str: str, today: date) -> date | None:
@@ -2261,14 +2308,33 @@ def _poster_days(week_days: list[dict]) -> list[PosterDay]:
             days.append(PosterDay(day_date, time=d.get("time", ""), remote=bool(d.get("is_remote"))))
     return days
 
-def _poster_caption(days: list[PosterDay], bot_username: str) -> str:
-    lines = [f"📅 Расписание на {date_range_label(days)}", ""]
-    for i, day in enumerate(days):
-        if day.has_training:
-            lines.append(f"{_POSTER_DAY_SHORT[i]}, {day.date.day} — {day.time or 'удалённо'}")
-    if bot_username:
-        lines += ["", f"Запись — в боте @{bot_username}"]
-    return "\n".join(lines)
+def _bot_url(username: str) -> str:
+    return f"https://t.me/{username}" if username else "https://t.me/calendar_tap_bot"
+
+def _render_poster_caption(tpl: str, days: list[PosterDay], bot_username: str) -> str:
+    """Шаблон → текст поста: строка с {день}/{время}/{дата} — по разу на каждую тренировку."""
+    out = []
+    for line in tpl.split("\n"):
+        if any(ph in line for ph in ("{день}", "{время}", "{дата}")):
+            items = []
+            for i, d in enumerate(days):
+                if not d.has_training:
+                    continue
+                items.append(line
+                             .replace("{день}", _POSTER_DAY_FULL[i])
+                             .replace("{время}", html.escape(d.time or "удалённо"))
+                             .replace("{дата}", f"{d.date.day} {MONTHS_RU_GEN[d.date.month - 1]}"))
+            out.append("\n\n".join(items))
+        else:
+            out.append(line)
+    last = days[-1].date
+    return ("\n".join(out)
+            .replace("{до}", f"{last.day} {MONTHS_RU_GEN[last.month - 1]}")
+            .replace("{бот}", _bot_url(bot_username)))
+
+def _caption_len(caption_html: str) -> int:
+    """Длина подписи так, как её считает Telegram — без HTML-разметки."""
+    return len(html.unescape(re.sub(r"<[^>]+>", "", caption_html)))
 
 async def _bot_username() -> str:
     try:
@@ -2276,41 +2342,231 @@ async def _bot_username() -> str:
     except Exception:
         return ""
 
-async def publish_schedule_poster() -> tuple[bool, str]:
-    """Рисует постер текущей недели и публикует его в канал.
-    Возвращает (опубликован ли, короткий статус для тренера)."""
-    global _poster_last
+async def build_poster_draft() -> tuple[dict | None, str]:
+    """Постер и текст текущей недели. Возвращает (черновик, причина если не сделан)."""
     if _week_marker_row == -1:
-        return False, "нет открытой недели — постер не сделан"
+        return None, "нет открытой недели — постер не сделан"
     _invalidate_bd()
     days = _poster_days(tr_get_current_week_days())
     if not any(d.has_training for d in days):
-        return False, "на неделе нет тренировок — постер не публикую"
+        return None, "на неделе нет тренировок — постер не делаю"
     png = await asyncio.to_thread(render_schedule_poster, days)
-    username = await _bot_username()
-    caption = _poster_caption(days, username)
-    photo = BufferedInputFile(png, filename="raspisanie.png")
+    caption = _render_poster_caption(_poster_caption_tpl or POSTER_CAPTION_DEFAULT, days,
+                                     await _bot_username())
+    return {"week_row": _week_marker_row, "png": png, "caption": caption}, ""
 
+def _kb_poster_preview() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    if _poster_target:
+        b.button(text="✅ Опубликовать",   callback_data="poster_pub")
+    b.button(text="✏️ Изменить текст",    callback_data="poster_edit")
+    b.button(text="📝 Шаблон текста",     callback_data="tr_poster_text")
+    b.button(text="🚫 Не публиковать",    callback_data="poster_drop")
+    b.adjust(1)
+    return b.as_markup()
+
+async def _send_poster_preview(draft: dict) -> None:
+    """Присылает тренеру постер с текстом и кнопками; убирает кнопки у прежнего предпросмотра."""
+    old_id = draft.get("preview_msg_id")
+    if old_id:
+        try: await bot.edit_message_reply_markup(chat_id=draft["chat_id"], message_id=old_id, reply_markup=None)
+        except Exception: pass
+    msg = await bot.send_photo(draft["chat_id"], BufferedInputFile(draft["png"], filename="raspisanie.png"),
+                               caption=draft["caption"], parse_mode="HTML",
+                               reply_markup=_kb_poster_preview())
+    draft["preview_msg_id"] = msg.message_id
+    notes = []
+    if _caption_len(draft["caption"]) > CAPTION_LIMIT:
+        notes.append(f"⚠️ Текст длиннее {CAPTION_LIMIT} символов — Telegram его не примет, сократите.")
     if not _poster_target:
-        hint = (f"\n\n⚙️ Чтобы бот публиковал постер сам: добавьте его админом в канал "
-                f"и отправьте там /poster_here@{username or 'имя_бота'} "
-                f"(в группе с темами — внутри ветки «Расписание»).")
-        await bot.send_photo(TRAINER_ID, photo, caption=caption + hint)
-        return False, "канал не привязан — постер прислал вам в личку"
+        notes.append(f"⚙️ Группа для постера не привязана: отправьте /poster_here@{await _bot_username() or 'имя_бота'} "
+                     "в нужной теме, потом нажмите «Уведомить» ещё раз.")
+    if notes:
+        await bot.send_message(draft["chat_id"], "\n\n".join(notes))
 
+async def send_poster_preview(chat_id: int) -> tuple[bool, str]:
+    """Делает черновик постера и присылает тренеру на проверку. Возвращает (сделан ли, статус)."""
+    global _poster_draft
+    draft, reason = await build_poster_draft()
+    if not draft:
+        return False, reason
+    draft["chat_id"] = chat_id
+    _poster_draft = draft
+    await _send_poster_preview(draft)
+    return True, "постер с текстом прислал вам в личку — проверьте и нажмите «Опубликовать»"
+
+async def _poster_stale(callback: CallbackQuery) -> None:
+    """Черновик устарел (перезапуск бота, другая неделя) — делаем постер заново."""
+    ok, status = await send_poster_preview(callback.message.chat.id)
+    text = "Черновик устарел — прислал постер заново, проверьте" if ok else status
+    try: await callback.answer(text[:200], show_alert=True)
+    except: pass
+
+@dp.callback_query(F.data == "tr_poster")
+async def cb_tr_poster(callback: CallbackQuery):
+    """Панель тренера → «🖼 Постер»: предпросмотр текущей недели без рассылки ученикам."""
+    if not is_trainer(callback.from_user.id): return
+    try:
+        ok, status = await send_poster_preview(callback.message.chat.id)
+    except Exception as e:
+        traceback.print_exc()
+        ok, status = False, f"постер не сделан: {e}"
+    try: await callback.answer(None if ok else status[:200], show_alert=not ok)
+    except: pass
+
+async def publish_poster_draft(draft: dict) -> tuple[bool, str]:
+    """Публикует черновик в привязанную группу. Возвращает (опубликован ли, статус)."""
+    global _poster_last
+    if not _poster_target:
+        return False, "группа не привязана — отправьте /poster_here в нужной теме"
+    if _caption_len(draft["caption"]) > CAPTION_LIMIT:
+        return False, f"текст длиннее {CAPTION_LIMIT} символов — сократите через «Изменить текст»"
     chat_id, thread_id = _poster_target
-    # Повторное «Уведомить» на той же неделе — обновляем уже опубликованный постер
-    if _poster_last.get("week_row") == _week_marker_row and _poster_last.get("chat_id") == chat_id:
+    photo = BufferedInputFile(draft["png"], filename="raspisanie.png")
+    # Повторная публикация на той же неделе — обновляем уже опубликованный пост
+    if _poster_last.get("week_row") == draft["week_row"] and _poster_last.get("chat_id") == chat_id:
         try:
             await bot.edit_message_media(
                 chat_id=chat_id, message_id=_poster_last["message_id"],
-                media=InputMediaPhoto(media=photo, caption=caption))
-            return True, "постер в канале обновлён"
+                media=InputMediaPhoto(media=photo, caption=draft["caption"], parse_mode="HTML"))
+            return True, "постер в группе обновлён"
         except TelegramBadRequest as e:
-            print(f"publish_schedule_poster: не удалось обновить пост ({e}) — публикую заново")
-    msg = await bot.send_photo(chat_id, photo, caption=caption, message_thread_id=thread_id)
-    _poster_last = {"week_row": _week_marker_row, "chat_id": chat_id, "message_id": msg.message_id}
-    return True, "постер опубликован в канале"
+            print(f"publish_poster_draft: не удалось обновить пост ({e}) — публикую заново")
+    msg = await bot.send_photo(chat_id, photo, caption=draft["caption"], parse_mode="HTML",
+                               message_thread_id=thread_id)
+    _poster_last = {"week_row": draft["week_row"], "chat_id": chat_id, "message_id": msg.message_id}
+    return True, "постер опубликован в группе"
+
+def _poster_draft_actual() -> dict | None:
+    if _poster_draft and _poster_draft.get("week_row") == _week_marker_row:
+        return _poster_draft
+    return None
+
+@dp.callback_query(F.data == "poster_pub")
+async def cb_poster_pub(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    draft = _poster_draft_actual()
+    if not draft:
+        await _poster_stale(callback)
+        return
+    try:
+        ok, status = await publish_poster_draft(draft)
+    except Exception as e:
+        traceback.print_exc()
+        ok, status = False, f"не опубликован: {e}"
+    if ok:
+        try: await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception: pass
+        await callback.message.answer(f"✅ {status[:1].upper()}{status[1:]}.")
+    try: await callback.answer(status[:200], show_alert=not ok)
+    except: pass
+
+@dp.callback_query(F.data == "poster_drop")
+async def cb_poster_drop(callback: CallbackQuery):
+    global _poster_draft
+    if not is_trainer(callback.from_user.id): return
+    _poster_draft = {}
+    _trainer_state.pop(callback.from_user.id, None)
+    try: await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception: pass
+    try: await callback.answer("🚫 Постер не опубликован")
+    except: pass
+
+def _kb_poster_cancel() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="❌ Отмена", callback_data="poster_text_cancel")
+    return b.as_markup()
+
+@dp.callback_query(F.data == "poster_edit")
+async def cb_poster_edit(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    draft = _poster_draft_actual()
+    if not draft:
+        await _poster_stale(callback)
+        return
+    _trainer_state[callback.from_user.id] = {"action": "poster_caption"}
+    await callback.message.answer(
+        "✏️ Пришлите новый текст поста одним сообщением.\n"
+        "Удобно так: скопируйте текст ниже, поправьте и отправьте — ссылки и оформление сохранятся.\n\n"
+        "Это изменит только этот пост. Постоянный шаблон — /poster_text.",
+        reply_markup=_kb_poster_cancel())
+    await callback.message.answer(draft["caption"], parse_mode="HTML",
+                                  link_preview_options=LinkPreviewOptions(is_disabled=True))
+    try: await callback.answer()
+    except: pass
+
+async def _start_poster_template_edit(chat_id: int, uid: int):
+    _trainer_state[uid] = {"action": "poster_template"}
+    tpl = (_poster_caption_tpl or POSTER_CAPTION_DEFAULT).replace("{бот}", _bot_url(await _bot_username()))
+    await bot.send_message(
+        chat_id,
+        "📝 Шаблон текста к постеру — с ним постер уходит каждую неделю.\n\n"
+        "Пришлите новый шаблон одним сообщением (удобно скопировать текущий ниже и поправить). "
+        "Бот подставит сам:\n"
+        "• {до} — последний день недели («24 мая»);\n"
+        "• строку с {день}, {время} или {дата} повторит для каждой тренировки "
+        "(«Вторник», «20:00» или «удалённо», «19 мая»).",
+        reply_markup=_kb_poster_cancel())
+    await bot.send_message(chat_id, tpl, parse_mode="HTML",
+                           link_preview_options=LinkPreviewOptions(is_disabled=True))
+
+@dp.message(Command("poster_text"))
+async def cmd_poster_text(message: Message):
+    if message.chat.type != "private" or not message.from_user or not is_trainer(message.from_user.id):
+        return
+    await _start_poster_template_edit(message.chat.id, message.from_user.id)
+
+@dp.callback_query(F.data == "tr_poster_text")
+async def cb_tr_poster_text(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    await _start_poster_template_edit(callback.message.chat.id, callback.from_user.id)
+    try: await callback.answer()
+    except: pass
+
+@dp.callback_query(F.data == "poster_text_cancel")
+async def cb_poster_text_cancel(callback: CallbackQuery):
+    if not is_trainer(callback.from_user.id): return
+    _trainer_state.pop(callback.from_user.id, None)
+    try: await callback.message.edit_text("Ок, текст не меняю.")
+    except Exception: pass
+    try: await callback.answer()
+    except: pass
+
+async def handle_poster_text(message: Message, action: str):
+    """Текст от тренера: правка подписи черновика или нового шаблона."""
+    uid = message.from_user.id
+    new_html = (message.html_text or "").strip() if message.text else ""
+    if not new_html:
+        await message.reply("❌ Нужен текст. Пришлите сообщение с текстом или нажмите «Отмена».")
+        return
+    if action == "poster_caption":
+        draft = _poster_draft_actual()
+        _trainer_state.pop(uid, None)
+        if not draft:
+            await message.reply("Черновик устарел — откройте «🖼 Постер» в панели тренера, "
+                                "там можно поправить текст заново.")
+            return
+        if _caption_len(new_html) > CAPTION_LIMIT:
+            _trainer_state[uid] = {"action": "poster_caption"}
+            await message.reply(f"❌ {_caption_len(new_html)} символов — Telegram принимает к фото "
+                                f"не больше {CAPTION_LIMIT}. Сократите и пришлите снова.",
+                                reply_markup=_kb_poster_cancel())
+            return
+        draft["caption"] = new_html
+        await _send_poster_preview(draft)
+        return
+    # poster_template
+    if not any(ph in new_html for ph in ("{день}", "{время}", "{дата}")):
+        await message.reply("❌ В шаблоне нет строки с {день}, {время} или {дата} — тренировки не попадут в текст. "
+                            "Добавьте такую строку и пришлите снова.", reply_markup=_kb_poster_cancel())
+        return
+    _trainer_state.pop(uid, None)
+    saved = await asyncio.to_thread(save_poster_caption, new_html)
+    note = "" if saved else "\n⚠️ Не сохранилось в таблицу — шаблон до перезапуска бота."
+    b = InlineKeyboardBuilder()
+    b.button(text="🖼 Показать постер с этим текстом", callback_data="tr_poster")
+    await message.reply(f"✅ Шаблон сохранён — со следующего «📢 Уведомить» текст будет таким.{note}",
+                        reply_markup=b.as_markup())
 
 async def _delete_later(chat_id: int, message_ids: list[int], delay: float):
     await asyncio.sleep(delay)
@@ -2418,12 +2674,12 @@ async def cb_tr_notify_students(callback: CallbackQuery):
             f"Открой бот чтобы посмотреть и записаться 👇"
         )
     try:
-        posted, poster_status = await publish_schedule_poster()
+        _, poster_status = await send_poster_preview(callback.message.chat.id)
     except Exception as e:
         traceback.print_exc()
-        posted, poster_status = False, f"постер не опубликован: {e}"
+        poster_status = f"постер не сделан: {e}"
     status = f"📢 Уведомления отправлены!\n🖼 {poster_status}"
-    try: await callback.answer(status[:200], show_alert=not posted)
+    try: await callback.answer(status[:200], show_alert=True)
     except Exception:
         await notify_trainer(status)
     await cb_tr_schedule(callback)
@@ -3725,6 +3981,11 @@ async def handle_trainer_input(message: Message):
     uid   = message.from_user.id
     state = _trainer_state.get(uid, {})
     action = state.get("action", "")
+
+    if action in ("poster_caption", "poster_template"):
+        if message.chat.type == "private":
+            await handle_poster_text(message, action)
+        return
 
     if action == "waiting_password":
         if message.text and message.text.strip() == TRAINER_PASSWORD:
